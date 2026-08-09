@@ -31,10 +31,12 @@ profile wealthfolio flags=(attach_disconnected,mediate_deleted,complain) {
   /sbin/su-exec ix,
 
   # su-exec resolves the upstream Wealthfolio user and group by name.
+
   /etc/passwd r,
   /etc/group r,
 
   # OpenSSL CLI configuration if consulted during key generation.
+
   /etc/ssl/openssl.cnf r,
 
   # -------------------------------------------------------------------------
@@ -109,5 +111,12 @@ profile wealthfolio flags=(attach_disconnected,mediate_deleted,complain) {
 
     /etc/resolv.conf r,
     /etc/hosts r,
+
+    # -----------------------------------------------------------------------
+    # Runtime resource detection
+    # -----------------------------------------------------------------------
+
+    owner /proc/*/cgroup r,
+    /sys/fs/cgroup/cpu.max r,
   }
 }
