@@ -1,0 +1,42 @@
+name: "Wealthfolio (Unofficial)"
+version: "3.6.3-1"
+slug: "wealthfolio"
+description: >-
+  Unofficial Home Assistant App wrapper for running the official
+  Wealthfolio self-hosted application.
+url: "https://github.com/Ortega3159/add-on"
+
+arch:
+  - amd64
+  - aarch64
+
+stage: experimental
+startup: application
+boot: auto
+backup: cold
+tmpfs: true
+
+ports:
+  8088/tcp: 8088
+
+ports_description:
+  8088/tcp: "Wealthfolio web interface"
+
+webui: "http://[HOST]:[PORT:8088]"
+watchdog: "http://[HOST]:[PORT:8088]/api/v1/healthz"
+
+environment:
+  WF_LISTEN_ADDR: "0.0.0.0:8088"
+  WF_DB_PATH: "/data/wealthfolio/wealthfolio.db"
+  WF_AUTH_REQUIRED: "true"
+  WF_MCP_ENABLED: "false"
+
+options:
+  auth_password_hash: null
+  cors_allow_origins: null
+  auth_token_ttl_minutes: 480
+
+schema:
+  auth_password_hash: password
+  cors_allow_origins: "str(1,)"
+  auth_token_ttl_minutes: "int(1,)"

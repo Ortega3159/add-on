@@ -1,0 +1,113 @@
+#include <tunables/global>
+
+profile wealthfolio flags=(attach_disconnected,mediate_deleted,complain) {
+  #include <abstractions/base>
+
+  # -------------------------------------------------------------------------
+  # Bootstrap lifecycle
+  # -------------------------------------------------------------------------
+
+  signal receive,
+
+  # -------------------------------------------------------------------------
+  # Bootstrap-only capabilities
+  # -------------------------------------------------------------------------
+
+  capability chown,
+  capability dac_override,
+  capability setgid,
+  capability setuid,
+
+  # -------------------------------------------------------------------------
+  # Bootstrap script and runtime tools
+  # -------------------------------------------------------------------------
+
+  /run.sh rix,
+
+  /bin/** ix,
+
+  /usr/bin/jq ix,
+  /usr/bin/openssl ix,
+  /sbin/su-exec ix,
+
+  # su-exec resolves the upstream Wealthfolio user and group by name.
+  /etc/passwd r,
+  /etc/group r,
+
+  # OpenSSL CLI configuration if consulted during key generation.
+  /etc/ssl/openssl.cnf r,
+
+  # -------------------------------------------------------------------------
+  # Home Assistant configuration and wrapper-owned master key
+  # -------------------------------------------------------------------------
+
+  /data/ rw,
+
+  /data/options.json r,
+
+  /data/.wf_secret_key rw,
+  /data/.wf_secret_key.tmp.* rw,
+
+  # -------------------------------------------------------------------------
+  # Wealthfolio persistent storage preparation
+  # -------------------------------------------------------------------------
+
+  /data/wealthfolio/ rw,
+  /data/wealthfolio/** rw,
+
+  # -------------------------------------------------------------------------
+  # Transition into the non-root Wealthfolio application domain
+  # -------------------------------------------------------------------------
+
+  /usr/local/bin/wealthfolio-server cx -> wealthfolio-server,
+
+  profile wealthfolio-server flags=(attach_disconnected,mediate_deleted,complain) {
+    #include <abstractions/base>
+
+    # -----------------------------------------------------------------------
+    # Container lifecycle
+    # -----------------------------------------------------------------------
+
+    signal receive,
+
+    # -----------------------------------------------------------------------
+    # Network
+    # -----------------------------------------------------------------------
+
+    network inet stream,
+    network inet6 stream,
+    network inet dgram,
+    network inet6 dgram,
+
+    # -----------------------------------------------------------------------
+    # Wealthfolio application
+    # -----------------------------------------------------------------------
+
+    /usr/local/bin/wealthfolio-server rm,
+
+    /app/ r,
+    /app/dist/ r,
+    /app/dist/** r,
+
+    # -----------------------------------------------------------------------
+    # Persistent Wealthfolio data
+    # -----------------------------------------------------------------------
+
+    /data/wealthfolio/ rw,
+    /data/wealthfolio/** rwk,
+
+    # -----------------------------------------------------------------------
+    # Temporary storage
+    # -----------------------------------------------------------------------
+
+    /tmp/ rw,
+    /tmp/** rwk,
+
+    # -----------------------------------------------------------------------
+    # Name resolution
+    # -----------------------------------------------------------------------
+
+    /etc/resolv.conf r,
+    /etc/hosts r,
+  }
+}
