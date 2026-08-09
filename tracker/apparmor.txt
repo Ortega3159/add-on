@@ -40,6 +40,27 @@ profile wealthfolio flags=(attach_disconnected,mediate_deleted,complain) {
   /etc/ssl/openssl.cnf r,
 
   # -------------------------------------------------------------------------
+  # Bootstrap lifecycle
+  # -------------------------------------------------------------------------
+
+  signal receive,
+
+  # -------------------------------------------------------------------------
+  # Container init signal forwarding
+  # -------------------------------------------------------------------------
+
+  capability kill,
+
+  # -------------------------------------------------------------------------
+  # Bootstrap-only capabilities
+  # -------------------------------------------------------------------------
+
+  capability chown,
+  capability dac_override,
+  capability setgid,
+  capability setuid,
+  
+  # -------------------------------------------------------------------------
   # Home Assistant configuration and wrapper-owned master key
   # -------------------------------------------------------------------------
 
