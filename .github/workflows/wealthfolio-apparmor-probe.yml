@@ -114,8 +114,11 @@ jobs:
             [ -z "$CONFINED_CONTAINER" ] \
               || docker rm -f "$CONFINED_CONTAINER" >/dev/null 2>&1 || true
 
-            [ -z "$BASELINE_DATA" ] || rm -rf "$BASELINE_DATA"
-            [ -z "$CONFINED_DATA" ] || rm -rf "$CONFINED_DATA"
+            # Wealthfolio creates/chowns persistent files as its non-root
+            # container user. Remove the disposable bind-mount directories
+            # with sudo so cleanup cannot turn a successful probe red.
+            [ -z "$BASELINE_DATA" ] || sudo rm -rf -- "$BASELINE_DATA" || true
+            [ -z "$CONFINED_DATA" ] || sudo rm -rf -- "$CONFINED_DATA" || true
 
             if [ -n "${TEST_PROFILE:-}" ] && [ -f "$TEST_PROFILE" ]; then
               sudo apparmor_parser -R "$TEST_PROFILE" >/dev/null 2>&1 || true
