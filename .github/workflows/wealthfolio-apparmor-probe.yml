@@ -38,6 +38,7 @@ jobs:
           docker info --format 'SecurityOptions={{json .SecurityOptions}}'
 
           echo "=== AppArmor ==="
+          apparmor_parser --version
           test -r /sys/module/apparmor/parameters/enabled
           printf 'kernel AppArmor enabled: '
           cat /sys/module/apparmor/parameters/enabled
@@ -46,21 +47,63 @@ jobs:
           command -v aa-status
           sudo aa-status
 
-      - name: Run known-good wrapper under its real AppArmor profile
+      - name: Prepare semantically equivalent CI profile
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SOURCE_PROFILE="tracker/apparmor.txt"
+          TEST_PROFILE="${RUNNER_TEMP}/wealthfolio-apparmor-ci.txt"
+
+          cp "$SOURCE_PROFILE" "$TEST_PROFILE"
+
+          # Ubuntu's AppArmor parser on the GitHub-hosted runner rejects the
+          # legacy/bare `signal receive,` form. The parenthesized form is the
+          # documented equivalent: `signal (receive),`.
+          BARE_SIGNAL_COUNT="$(
+            grep -Ec '^[[:space:]]*signal receive,$' "$TEST_PROFILE" || true
+          )"
+
+          printf 'bare signal receive rules found: %s\n' "$BARE_SIGNAL_COUNT"
+
+          # Fail closed if the source profile no longer has the exact shape
+          # this probe was designed to adapt.
+          test "$BARE_SIGNAL_COUNT" -eq 3
+
+          sed -Ei \
+            's/^([[:space:]]*)signal receive,$/\1signal (receive),/' \
+            "$TEST_PROFILE"
+
+          test "$(
+            grep -Ec '^[[:space:]]*signal receive,$' "$TEST_PROFILE" || true
+          )" -eq 0
+
+          test "$(
+            grep -Ec '^[[:space:]]*signal \(receive\),$' "$TEST_PROFILE" || true
+          )" -eq 3
+
+          echo "=== CI-only syntax adaptation ==="
+          diff -u "$SOURCE_PROFILE" "$TEST_PROFILE" || true
+
+          echo "=== Parse/load adapted profile ==="
+          sudo apparmor_parser -r -W "$TEST_PROFILE"
+          sudo aa-status
+
+          printf 'TEST_PROFILE=%s\n' "$TEST_PROFILE" >> "$GITHUB_ENV"
+
+      - name: Run known-good wrapper under adapted AppArmor profile
         shell: bash
         run: |
           set -euo pipefail
 
           cleanup() {
             docker rm -f wf-aa-probe >/dev/null 2>&1 || true
-            sudo apparmor_parser -R tracker/apparmor.txt >/dev/null 2>&1 || true
+            if [ -n "${TEST_PROFILE:-}" ] && [ -f "$TEST_PROFILE" ]; then
+              sudo apparmor_parser -R "$TEST_PROFILE" >/dev/null 2>&1 || true
+            fi
             [ -z "${DATA_DIR:-}" ] || rm -rf "$DATA_DIR"
           }
           trap cleanup EXIT
-
-          echo "=== Load profile ==="
-          sudo apparmor_parser -r -W tracker/apparmor.txt
-          sudo aa-status
 
           echo "=== Build known-good wrapper ==="
           docker build \
