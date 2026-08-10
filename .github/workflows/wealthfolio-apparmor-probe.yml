@@ -55,21 +55,28 @@ jobs:
           SOURCE_PROFILE="tracker/apparmor.txt"
           TEST_PROFILE="${RUNNER_TEMP}/wealthfolio-apparmor-ci.txt"
 
-          cp "$SOURCE_PROFILE" "$TEST_PROFILE"
+          echo "=== Source profile line endings ==="
+          file "$SOURCE_PROFILE"
 
-          # Ubuntu's AppArmor parser on the GitHub-hosted runner rejects the
-          # legacy/bare `signal receive,` form. The parenthesized form is the
-          # documented equivalent: `signal (receive),`.
+          # The repository file currently uses CRLF. Normalize only the
+          # temporary CI copy so exact line-oriented checks behave
+          # deterministically on Linux.
+          tr -d '\r' < "$SOURCE_PROFILE" > "$TEST_PROFILE"
+
           BARE_SIGNAL_COUNT="$(
             grep -Ec '^[[:space:]]*signal receive,$' "$TEST_PROFILE" || true
           )"
 
-          printf 'bare signal receive rules found: %s\n' "$BARE_SIGNAL_COUNT"
+          printf 'bare signal receive rules found after LF normalization: %s\n' \
+            "$BARE_SIGNAL_COUNT"
 
           # Fail closed if the source profile no longer has the exact shape
           # this probe was designed to adapt.
           test "$BARE_SIGNAL_COUNT" -eq 3
 
+          # AppArmor 4.0.1 on the GitHub-hosted Ubuntu runner rejects the
+          # bare form accepted by the HAOS/Supervisor environment. Use the
+          # semantically equivalent parenthesized form in this temporary copy.
           sed -Ei \
             's/^([[:space:]]*)signal receive,$/\1signal (receive),/' \
             "$TEST_PROFILE"
@@ -82,8 +89,11 @@ jobs:
             grep -Ec '^[[:space:]]*signal \(receive\),$' "$TEST_PROFILE" || true
           )" -eq 3
 
-          echo "=== CI-only syntax adaptation ==="
-          diff -u "$SOURCE_PROFILE" "$TEST_PROFILE" || true
+          echo "=== CI-only differences from repository profile ==="
+          diff -u \
+            <(tr -d '\r' < "$SOURCE_PROFILE") \
+            "$TEST_PROFILE" \
+            || true
 
           echo "=== Parse/load adapted profile ==="
           sudo apparmor_parser -r -W "$TEST_PROFILE"
