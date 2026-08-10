@@ -1,0 +1,268 @@
+name: Wealthfolio Cortex-A53 probe
+
+on:
+  push:
+    branches:
+      - chore/wealthfolio-cortex-a53-probe
+
+permissions:
+  contents: read
+
+jobs:
+  cortex-a53:
+    name: Reproduce ARMv8.0 Cortex-A53 regression
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Inspect host and Docker
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== Host ==="
+          uname -a
+
+          echo "=== Docker ==="
+          docker version
+
+          echo "=== Existing binfmt registrations ==="
+          if [ -d /proc/sys/fs/binfmt_misc ]; then
+            ls -la /proc/sys/fs/binfmt_misc
+          fi
+
+      - name: Install ARM64 QEMU binfmt
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Temporary diagnostic probe: pin the QEMU/binfmt release line rather
+          # than using `latest`. If this experiment becomes permanent, pin the
+          # exact container digest in the final workflow.
+          BINFMT_IMAGE="tonistiigi/binfmt:qemu-v10.2.3-68"
+
+          docker pull "$BINFMT_IMAGE"
+
+          echo "=== binfmt image identity ==="
+          docker image inspect \
+            --format 'id={{.Id}} repoDigests={{json .RepoDigests}}' \
+            "$BINFMT_IMAGE"
+
+          docker run --privileged --rm \
+            "$BINFMT_IMAGE" \
+            --install arm64
+
+          echo "=== Registered qemu-aarch64 ==="
+          test -r /proc/sys/fs/binfmt_misc/qemu-aarch64
+          cat /proc/sys/fs/binfmt_misc/qemu-aarch64
+
+      - name: Prove QEMU_CPU controls the emulator
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== QEMU_CPU=help control ==="
+
+          set +e
+          HELP_OUTPUT="$(
+            docker run --rm \
+              --platform linux/arm64 \
+              -e QEMU_CPU=help \
+              alpine:3.22 \
+              /bin/true 2>&1
+          )"
+          HELP_STATUS=$?
+          set -e
+
+          printf '%s\n' "$HELP_OUTPUT"
+          printf 'QEMU_CPU=help exit=%s\n' "$HELP_STATUS"
+
+          # QEMU handles `QEMU_CPU=help` as its `-cpu help` equivalent and must
+          # terminate instead of executing /bin/true normally.
+          test "$HELP_STATUS" -ne 0
+
+          printf '%s\n' "$HELP_OUTPUT" \
+            | grep -q 'cortex-a53'
+
+          echo "=== Cortex-A53 smoke ==="
+
+          docker run --rm \
+            --platform linux/arm64 \
+            -e QEMU_CPU=cortex-a53 \
+            alpine:3.22 \
+            /bin/sh -c 'uname -m && echo CORTEX_A53_QEMU_SMOKE=PASS'
+
+      - name: Resolve historical Wealthfolio ARM64 images
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for version in 3.6.0 3.6.1; do
+            ref="ghcr.io/wealthfolio/wealthfolio:${version}"
+
+            echo "=== Pull ${ref} for linux/arm64 ==="
+            docker pull --platform linux/arm64 "$ref"
+
+            echo "=== Image ${version} ==="
+            docker image inspect \
+              --format 'id={{.Id}} arch={{.Architecture}} os={{.Os}} repoDigests={{json .RepoDigests}}' \
+              "$ref"
+
+            test "$(
+              docker image inspect --format '{{.Architecture}}' "$ref"
+            )" = "arm64"
+
+            test "$(
+              docker image inspect --format '{{.Os}}' "$ref"
+            )" = "linux"
+          done
+
+      - name: Compare Wealthfolio 3.6.0 and 3.6.1 on Cortex-A53
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SECRET_KEY="MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+          PASSWORD_HASH='$argon2id$v=19$m=19456,t=2,p=1$d2VhbHRoZm9saW8tY2ktc2FsdA$0S06Pkzh1UOb4foQLdD7/CHINd64HR17scQLwtJD0MU'
+
+          run_version() {
+            version="$1"
+            name="wf-cortex-${version//./-}"
+            data_dir="$(mktemp -d)"
+
+            # Match the upstream v3.6.x container's documented/runtime
+            # ownership model used in the Cortex-A53 bug report instead of
+            # making the test volume world-writable.
+            sudo chown 1000:1000 "$data_dir"
+            chmod 0755 "$data_dir"
+
+            cleanup_one() {
+              docker rm -f "$name" >/dev/null 2>&1 || true
+              sudo rm -rf -- "$data_dir" || true
+            }
+
+            trap cleanup_one RETURN
+
+            echo
+            echo "============================================================"
+            echo "Wealthfolio ${version} with QEMU_CPU=cortex-a53"
+            echo "============================================================"
+
+            docker run -d \
+              --name "$name" \
+              --platform linux/arm64 \
+              --init \
+              --tmpfs /tmp \
+              -p 127.0.0.1::8088 \
+              -v "$data_dir:/data" \
+              -e QEMU_CPU=cortex-a53 \
+              -e WF_LISTEN_ADDR=0.0.0.0:8088 \
+              -e WF_DB_PATH=/data/wealthfolio.db \
+              -e WF_SECRET_KEY="$SECRET_KEY" \
+              -e WF_AUTH_REQUIRED=true \
+              -e WF_AUTH_PASSWORD_HASH="$PASSWORD_HASH" \
+              -e WF_CORS_ALLOW_ORIGINS=http://127.0.0.1:8088 \
+              -e WF_AUTH_TOKEN_TTL_MINUTES=480 \
+              -e WF_MCP_ENABLED=false \
+              "ghcr.io/wealthfolio/wealthfolio:${version}"
+
+            port="$(
+              docker inspect \
+                --format '{{(index (index .NetworkSettings.Ports "8088/tcp") 0).HostPort}}' \
+                "$name"
+            )"
+
+            outcome="TIMEOUT"
+
+            for _ in $(seq 1 90); do
+              running="$(
+                docker inspect --format '{{.State.Running}}' "$name"
+              )"
+
+              if [ "$running" != "true" ]; then
+                outcome="EXITED"
+                break
+              fi
+
+              if curl --fail --silent \
+                "http://127.0.0.1:${port}/api/v1/healthz" >/dev/null \
+                || curl --fail --silent \
+                "http://127.0.0.1:${port}/" >/dev/null; then
+                outcome="HEALTHY"
+                break
+              fi
+
+              sleep 1
+            done
+
+            running="$(
+              docker inspect --format '{{.State.Running}}' "$name"
+            )"
+            exit_code="$(
+              docker inspect --format '{{.State.ExitCode}}' "$name"
+            )"
+            oom="$(
+              docker inspect --format '{{.State.OOMKilled}}' "$name"
+            )"
+
+            printf 'version=%s outcome=%s running=%s exit=%s oom=%s\n' \
+              "$version" "$outcome" "$running" "$exit_code" "$oom"
+
+            echo "=== Logs: ${version} ==="
+            docker logs "$name" || true
+
+            case "$outcome" in
+              HEALTHY)
+                result="PASS"
+                ;;
+              EXITED)
+                result="EXIT_${exit_code}"
+                ;;
+              *)
+                result="TIMEOUT"
+                ;;
+            esac
+
+            printf '%s\n' "$result"
+          }
+
+          RESULT_360="$(run_version 3.6.0 | tee /tmp/wf-360.log | tail -1)"
+          RESULT_361="$(run_version 3.6.1 | tee /tmp/wf-361.log | tail -1)"
+
+          echo
+          echo "=== Detailed 3.6.0 result ==="
+          cat /tmp/wf-360.log
+
+          echo
+          echo "=== Detailed 3.6.1 result ==="
+          cat /tmp/wf-361.log
+
+          echo
+          echo "=== Classification ==="
+          printf '3.6.0=%s\n' "$RESULT_360"
+          printf '3.6.1=%s\n' "$RESULT_361"
+
+          if [ "$RESULT_360" != "PASS" ]; then
+            echo "CORTEX_A53_PROBE=INVALID_BASELINE"
+            exit 1
+          fi
+
+          if [ "$RESULT_361" = "EXIT_139" ]; then
+            echo "CORTEX_A53_PROBE=EXACT_REPRO"
+            exit 0
+          fi
+
+          case "$RESULT_361" in
+            EXIT_*)
+              echo "CORTEX_A53_PROBE=PARTIAL_REPRO"
+              exit 0
+              ;;
+            PASS)
+              echo "CORTEX_A53_PROBE=NO_REPRO"
+              exit 0
+              ;;
+            *)
+              echo "CORTEX_A53_PROBE=INCONCLUSIVE"
+              exit 1
+              ;;
+          esac
