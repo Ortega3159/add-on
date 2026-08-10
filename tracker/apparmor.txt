@@ -51,6 +51,8 @@ profile wealthfolio flags=(attach_disconnected,mediate_deleted,complain) {
 
   capability kill,
 
+  signal (send) set=(term) peer=*//wealthfolio-server,
+
   # -------------------------------------------------------------------------
   # Bootstrap-only capabilities
   # -------------------------------------------------------------------------
