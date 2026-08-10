@@ -1,5 +1,5 @@
 name: "Wealthfolio (Unofficial)"
-version: "3.6.3-1"
+version: "3.6.3-2"
 slug: "wealthfolio"
 description: >-
   Unofficial Home Assistant App wrapper for running the official
@@ -13,6 +13,7 @@ arch:
 stage: experimental
 startup: application
 boot: auto
+init: true
 backup: cold
 tmpfs: true
 
