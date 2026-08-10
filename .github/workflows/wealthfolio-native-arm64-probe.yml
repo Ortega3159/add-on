@@ -1,0 +1,373 @@
+name: Wealthfolio native ARM64 probe
+
+on:
+  push:
+    branches:
+      - chore/wealthfolio-native-arm64-probe
+
+permissions:
+  contents: read
+
+jobs:
+  native-arm64:
+    name: Verify native ARM64 build and AppArmor runtime
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+
+    steps:
+      - name: Fetch exact commit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git init .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --depth=1 origin "${GITHUB_SHA}"
+          git checkout --detach FETCH_HEAD
+
+      - name: Inspect native ARM64 runner
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== Host ==="
+          uname -a
+          printf 'uname -m: '
+          uname -m
+          test "$(uname -m)" = "aarch64"
+
+          echo "=== Docker ==="
+          docker version
+          docker info --format \
+            'Architecture={{.Architecture}} OSType={{.OSType}} SecurityOptions={{json .SecurityOptions}}'
+
+          test "$(docker info --format '{{.Architecture}}')" = "aarch64"
+          test "$(docker info --format '{{.OSType}}')" = "linux"
+
+          echo "=== AppArmor ==="
+          apparmor_parser --version
+          test -r /sys/module/apparmor/parameters/enabled
+          test "$(cat /sys/module/apparmor/parameters/enabled)" = "Y"
+
+          docker info --format '{{json .SecurityOptions}}' \
+            | grep -q '"name=apparmor"'
+
+          command -v apparmor_parser
+          command -v aa-status
+          sudo aa-status
+
+      - name: Prepare and load CI-equivalent AppArmor profile
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SOURCE_PROFILE="tracker/apparmor.txt"
+          TEST_PROFILE="${RUNNER_TEMP}/wealthfolio-apparmor-ci.txt"
+
+          echo "=== Source line endings ==="
+          file "$SOURCE_PROFILE"
+
+          # Normalize only the temporary copy. This is harmless when the source
+          # is already LF and keeps the probe robust while the repository is
+          # being normalized.
+          tr -d '\r' < "$SOURCE_PROFILE" > "$TEST_PROFILE"
+
+          BARE_SIGNAL_COUNT="$(
+            grep -Ec '^[[:space:]]*signal receive,$' "$TEST_PROFILE" || true
+          )"
+
+          printf 'bare signal receive rules: %s\n' "$BARE_SIGNAL_COUNT"
+          test "$BARE_SIGNAL_COUNT" -eq 3
+
+          # Ubuntu AppArmor 4.x rejects the bare form accepted in the HAOS
+          # environment. Adapt only the disposable CI copy.
+          sed -Ei \
+            's/^([[:space:]]*)signal receive,$/\1signal (receive),/' \
+            "$TEST_PROFILE"
+
+          test "$(
+            grep -Ec '^[[:space:]]*signal \(receive\),$' "$TEST_PROFILE" || true
+          )" -eq 3
+
+          echo "=== CI-only syntax adaptation ==="
+          diff -u \
+            <(tr -d '\r' < "$SOURCE_PROFILE") \
+            "$TEST_PROFILE" \
+            || true
+
+          sudo apparmor_parser -r -W "$TEST_PROFILE"
+
+          sudo aa-status \
+            | grep -E 'wealthfolio($|//wealthfolio-server$)'
+
+          printf 'TEST_PROFILE=%s\n' "$TEST_PROFILE" >> "$GITHUB_ENV"
+
+      - name: Build known-good wrapper natively
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker build \
+            --pull \
+            --build-arg BUILD_VERSION=3.6.3-3 \
+            --build-arg BUILD_ARCH=aarch64 \
+            -t wealthfolio-native-arm64-probe:3.6.3-3 \
+            tracker
+
+          echo "=== Built image contract ==="
+
+          docker image inspect \
+            --format \
+            'arch={{.Architecture}} os={{.Os}} user={{json .Config.User}} cmd={{json .Config.Cmd}} entrypoint={{json .Config.Entrypoint}} labels={{json .Config.Labels}}' \
+            wealthfolio-native-arm64-probe:3.6.3-3
+
+          test "$(
+            docker image inspect \
+              --format '{{.Architecture}}' \
+              wealthfolio-native-arm64-probe:3.6.3-3
+          )" = "arm64"
+
+          test "$(
+            docker image inspect \
+              --format '{{.Os}}' \
+              wealthfolio-native-arm64-probe:3.6.3-3
+          )" = "linux"
+
+          test "$(
+            docker image inspect \
+              --format '{{.Config.User}}' \
+              wealthfolio-native-arm64-probe:3.6.3-3
+          )" = "root"
+
+          test "$(
+            docker image inspect \
+              --format '{{json .Config.Cmd}}' \
+              wealthfolio-native-arm64-probe:3.6.3-3
+          )" = '["/run.sh"]'
+
+          test "$(
+            docker image inspect \
+              --format '{{.Config.Labels.io.hass.arch}}' \
+              wealthfolio-native-arm64-probe:3.6.3-3
+          )" = "aarch64"
+
+          test "$(
+            docker image inspect \
+              --format '{{.Config.Labels.io.hass.version}}' \
+              wealthfolio-native-arm64-probe:3.6.3-3
+          )" = "3.6.3-3"
+
+          test "$(
+            docker image inspect \
+              --format '{{.Config.Labels.io.hass.type}}' \
+              wealthfolio-native-arm64-probe:3.6.3-3
+          )" = "app"
+
+          echo "NATIVE_ARM64_BUILD=PASS"
+
+      - name: Compare default and custom AppArmor runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BASELINE_CONTAINER="wf-arm64-baseline"
+          CONFINED_CONTAINER="wf-arm64-confined"
+          BASELINE_DATA=""
+          CONFINED_DATA=""
+
+          cleanup() {
+            [ -z "$BASELINE_CONTAINER" ] \
+              || docker rm -f "$BASELINE_CONTAINER" >/dev/null 2>&1 || true
+            [ -z "$CONFINED_CONTAINER" ] \
+              || docker rm -f "$CONFINED_CONTAINER" >/dev/null 2>&1 || true
+
+            [ -z "$BASELINE_DATA" ] \
+              || sudo rm -rf -- "$BASELINE_DATA" || true
+            [ -z "$CONFINED_DATA" ] \
+              || sudo rm -rf -- "$CONFINED_DATA" || true
+
+            if [ -n "${TEST_PROFILE:-}" ] && [ -f "$TEST_PROFILE" ]; then
+              sudo apparmor_parser -R "$TEST_PROFILE" >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup EXIT
+
+          make_data_dir() {
+            target_dir="$(mktemp -d)"
+            chmod 0755 "$target_dir"
+
+            cat > "${target_dir}/options.json" <<'JSON'
+          {
+            "auth_password_hash": "$argon2id$v=19$m=19456,t=2,p=1$d2VhbHRoZm9saW8tY2ktc2FsdA$0S06Pkzh1UOb4foQLdD7/CHINd64HR17scQLwtJD0MU",
+            "cors_allow_origins": "http://127.0.0.1:8088",
+            "auth_token_ttl_minutes": 480
+          }
+          JSON
+
+            chmod 0644 "${target_dir}/options.json"
+            printf '%s\n' "$target_dir"
+          }
+
+          container_port() {
+            docker inspect \
+              --format '{{(index (index .NetworkSettings.Ports "8088/tcp") 0).HostPort}}' \
+              "$1"
+          }
+
+          wait_for_health() {
+            container="$1"
+            port="$2"
+
+            for _ in $(seq 1 90); do
+              if curl --fail --silent \
+                "http://127.0.0.1:${port}/api/v1/healthz" >/dev/null; then
+                return 0
+              fi
+
+              if [ "$(docker inspect --format '{{.State.Running}}' "$container")" != "true" ]; then
+                return 1
+              fi
+
+              sleep 2
+            done
+
+            return 1
+          }
+
+          dump_denials() {
+            sudo dmesg --color=never 2>/dev/null \
+              | grep 'apparmor="DENIED"' \
+              | grep -E 'profile="wealthfolio(//wealthfolio-server)?"' \
+              || true
+          }
+
+          echo "=== CONTROL A: native ARM64 + docker-default ==="
+
+          BASELINE_DATA="$(make_data_dir)"
+
+          docker run -d \
+            --name "$BASELINE_CONTAINER" \
+            --init \
+            --tmpfs /tmp \
+            -p 127.0.0.1::8088 \
+            -v "$BASELINE_DATA:/data" \
+            -e WF_LISTEN_ADDR=0.0.0.0:8088 \
+            -e WF_DB_PATH=/data/wealthfolio/wealthfolio.db \
+            -e WF_AUTH_REQUIRED=true \
+            -e WF_MCP_ENABLED=false \
+            wealthfolio-native-arm64-probe:3.6.3-3
+
+          test "$(
+            docker inspect --format '{{.AppArmorProfile}}' "$BASELINE_CONTAINER"
+          )" = "docker-default"
+
+          BASELINE_PORT="$(container_port "$BASELINE_CONTAINER")"
+
+          if ! wait_for_health "$BASELINE_CONTAINER" "$BASELINE_PORT"; then
+            docker inspect \
+              --format 'running={{.State.Running}} exit={{.State.ExitCode}} error={{json .State.Error}}' \
+              "$BASELINE_CONTAINER" || true
+            docker logs "$BASELINE_CONTAINER" || true
+            echo "NATIVE_ARM64_BASELINE=FAIL" >&2
+            exit 1
+          fi
+
+          curl --fail --silent \
+            "http://127.0.0.1:${BASELINE_PORT}/" >/dev/null
+
+          echo "NATIVE_ARM64_BASELINE=PASS"
+
+          docker rm -f "$BASELINE_CONTAINER" >/dev/null
+          BASELINE_CONTAINER=""
+
+          echo "=== CONTROL B: native ARM64 + wealthfolio AppArmor ==="
+
+          CONFINED_DATA="$(make_data_dir)"
+
+          docker run -d \
+            --name "$CONFINED_CONTAINER" \
+            --init \
+            --security-opt apparmor=wealthfolio \
+            --tmpfs /tmp \
+            -p 127.0.0.1::8088 \
+            -v "$CONFINED_DATA:/data" \
+            -e WF_LISTEN_ADDR=0.0.0.0:8088 \
+            -e WF_DB_PATH=/data/wealthfolio/wealthfolio.db \
+            -e WF_AUTH_REQUIRED=true \
+            -e WF_MCP_ENABLED=false \
+            wealthfolio-native-arm64-probe:3.6.3-3
+
+          test "$(
+            docker inspect --format '{{.AppArmorProfile}}' "$CONFINED_CONTAINER"
+          )" = "wealthfolio"
+
+          CONFINED_PORT="$(container_port "$CONFINED_CONTAINER")"
+
+          if ! wait_for_health "$CONFINED_CONTAINER" "$CONFINED_PORT"; then
+            docker inspect \
+              --format 'running={{.State.Running}} exit={{.State.ExitCode}} error={{json .State.Error}}' \
+              "$CONFINED_CONTAINER" || true
+
+            docker logs "$CONFINED_CONTAINER" || true
+
+            echo "=== AppArmor DENIED ==="
+            dump_denials
+
+            echo "NATIVE_ARM64_APPARMOR_START=FAIL" >&2
+            exit 1
+          fi
+
+          echo "NATIVE_ARM64_APPARMOR_START=PASS"
+
+          echo "=== Verify server user and AppArmor child domain ==="
+
+          SERVER_ROW="$(
+            docker top "$CONFINED_CONTAINER" -eo user,pid,args \
+              | awk '/\/usr\/local\/bin\/wealthfolio-server/ {print; exit}'
+          )"
+
+          test -n "$SERVER_ROW"
+          printf '%s\n' "$SERVER_ROW"
+
+          SERVER_USER="$(printf '%s\n' "$SERVER_ROW" | awk '{print $1}')"
+          SERVER_PID="$(printf '%s\n' "$SERVER_ROW" | awk '{print $2}')"
+
+          test "$SERVER_USER" != "root"
+          test "$SERVER_USER" != "0"
+
+          CURRENT_PROFILE="$(sudo cat "/proc/${SERVER_PID}/attr/current")"
+          printf 'wealthfolio-server domain: %s\n' "$CURRENT_PROFILE"
+
+          test "$CURRENT_PROFILE" = "wealthfolio//wealthfolio-server (enforce)"
+
+          echo "=== Legitimate-operation denial check ==="
+
+          NORMAL_DENIALS="$(dump_denials)"
+
+          if [ -n "$NORMAL_DENIALS" ]; then
+            printf '%s\n' "$NORMAL_DENIALS"
+            echo "Unexpected AppArmor denial during native ARM64 startup." >&2
+            exit 1
+          fi
+
+          echo "=== Negative AppArmor control ==="
+
+          if docker exec "$CONFINED_CONTAINER" /bin/sh -c \
+            'touch /root/wealthfolio-appamor-arm64-should-deny'; then
+            echo "Forbidden write unexpectedly succeeded." >&2
+            exit 1
+          fi
+
+          sleep 1
+
+          NEGATIVE_DENIALS="$(dump_denials)"
+
+          if [ -z "$NEGATIVE_DENIALS" ]; then
+            echo "Forbidden operation produced no matching AppArmor denial." >&2
+            exit 1
+          fi
+
+          printf '%s\n' "$NEGATIVE_DENIALS" | tail -20
+
+          echo "NATIVE_ARM64_APPARMOR=PASS"
+          echo "NATIVE_ARM64_PROBE=PASS"
