@@ -63,7 +63,7 @@ jobs:
           test "$BARE_SIGNAL_COUNT" -eq 3
 
           # AppArmor 4.0.1 on Ubuntu 24.04 rejects the bare form accepted by
-          # the HAOS environment. Use the documented equivalent in the
+          # the HAOS environment. Use the semantically equivalent form in the
           # temporary CI copy.
           sed -Ei \
             's/^([[:space:]]*)signal receive,$/\1signal (receive),/' \
@@ -73,7 +73,7 @@ jobs:
             grep -Ec '^[[:space:]]*signal \(receive\),$' "$TEST_PROFILE" || true
           )" -eq 3
 
-          echo "=== CI-only semantic syntax adaptation ==="
+          echo "=== CI-only syntax adaptation ==="
           diff -u \
             <(tr -d '\r' < "$SOURCE_PROFILE") \
             "$TEST_PROFILE" \
@@ -109,8 +109,10 @@ jobs:
           CONFINED_DATA=""
 
           cleanup() {
-            docker rm -f "$BASELINE_CONTAINER" >/dev/null 2>&1 || true
-            docker rm -f "$CONFINED_CONTAINER" >/dev/null 2>&1 || true
+            [ -z "$BASELINE_CONTAINER" ] \
+              || docker rm -f "$BASELINE_CONTAINER" >/dev/null 2>&1 || true
+            [ -z "$CONFINED_CONTAINER" ] \
+              || docker rm -f "$CONFINED_CONTAINER" >/dev/null 2>&1 || true
 
             [ -z "$BASELINE_DATA" ] || rm -rf "$BASELINE_DATA"
             [ -z "$CONFINED_DATA" ] || rm -rf "$CONFINED_DATA"
@@ -121,8 +123,15 @@ jobs:
           }
           trap cleanup EXIT
 
-          make_options() {
-            target_dir="$1"
+          make_data_dir() {
+            target_dir="$(mktemp -d)"
+
+            # GNU mktemp intentionally creates directories with no group/other
+            # permissions (normally 0700). That is secure on the host, but it
+            # is not a faithful /data simulation after the wrapper drops from
+            # root to the upstream `wealthfolio` user: the process must be able
+            # to traverse the bind-mounted /data root.
+            chmod 0755 "$target_dir"
 
             cat > "${target_dir}/options.json" <<'JSON'
           {
@@ -131,6 +140,19 @@ jobs:
             "auth_token_ttl_minutes": 480
           }
           JSON
+
+            chmod 0644 "${target_dir}/options.json"
+
+            printf '%s\n' "$target_dir"
+          }
+
+          show_data_permissions() {
+            label="$1"
+            data_dir="$2"
+
+            echo "=== ${label} /data host permissions ==="
+            stat -c 'path=%n mode=%a owner=%u:%g' "$data_dir"
+            stat -c 'path=%n mode=%a owner=%u:%g' "$data_dir/options.json"
           }
 
           container_port() {
@@ -185,8 +207,8 @@ jobs:
 
           echo "=== CONTROL A: standard Docker AppArmor (docker-default) ==="
 
-          BASELINE_DATA="$(mktemp -d)"
-          make_options "$BASELINE_DATA"
+          BASELINE_DATA="$(make_data_dir)"
+          show_data_permissions "CONTROL A" "$BASELINE_DATA"
 
           docker run -d \
             --name "$BASELINE_CONTAINER" \
@@ -226,8 +248,8 @@ jobs:
 
           echo "=== CONTROL B: custom wealthfolio AppArmor profile ==="
 
-          CONFINED_DATA="$(mktemp -d)"
-          make_options "$CONFINED_DATA"
+          CONFINED_DATA="$(make_data_dir)"
+          show_data_permissions "CONTROL B" "$CONFINED_DATA"
 
           docker run -d \
             --name "$CONFINED_CONTAINER" \
