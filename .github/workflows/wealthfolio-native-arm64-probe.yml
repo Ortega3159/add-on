@@ -121,47 +121,68 @@ jobs:
             'arch={{.Architecture}} os={{.Os}} user={{json .Config.User}} cmd={{json .Config.Cmd}} entrypoint={{json .Config.Entrypoint}} labels={{json .Config.Labels}}' \
             wealthfolio-native-arm64-probe:3.6.3-3
 
-          test "$(
-            docker image inspect \
-              --format '{{.Architecture}}' \
-              wealthfolio-native-arm64-probe:3.6.3-3
-          )" = "arm64"
+          assert_image_field() {
+            description="$1"
+            expected="$2"
+            format="$3"
 
-          test "$(
-            docker image inspect \
-              --format '{{.Os}}' \
-              wealthfolio-native-arm64-probe:3.6.3-3
-          )" = "linux"
+            actual="$(
+              docker image inspect \
+                --format "$format" \
+                wealthfolio-native-arm64-probe:3.6.3-3
+            )"
 
-          test "$(
-            docker image inspect \
-              --format '{{.Config.User}}' \
-              wealthfolio-native-arm64-probe:3.6.3-3
-          )" = "root"
+            printf '%s: expected=%s actual=%s\n' \
+              "$description" "$expected" "$actual"
 
-          test "$(
-            docker image inspect \
-              --format '{{json .Config.Cmd}}' \
-              wealthfolio-native-arm64-probe:3.6.3-3
-          )" = '["/run.sh"]'
+            if [ "$actual" != "$expected" ]; then
+              echo "Image contract mismatch: ${description}" >&2
+              exit 1
+            fi
+          }
 
-          test "$(
-            docker image inspect \
-              --format '{{.Config.Labels.io.hass.arch}}' \
-              wealthfolio-native-arm64-probe:3.6.3-3
-          )" = "aarch64"
+          assert_image_field \
+            "architecture" \
+            "arm64" \
+            '{{.Architecture}}'
 
-          test "$(
-            docker image inspect \
-              --format '{{.Config.Labels.io.hass.version}}' \
-              wealthfolio-native-arm64-probe:3.6.3-3
-          )" = "3.6.3-3"
+          assert_image_field \
+            "os" \
+            "linux" \
+            '{{.Os}}'
 
-          test "$(
-            docker image inspect \
-              --format '{{.Config.Labels.io.hass.type}}' \
-              wealthfolio-native-arm64-probe:3.6.3-3
-          )" = "app"
+          assert_image_field \
+            "user" \
+            "root" \
+            '{{.Config.User}}'
+
+          assert_image_field \
+            "cmd" \
+            '["/run.sh"]' \
+            '{{json .Config.Cmd}}'
+
+          assert_image_field \
+            "entrypoint" \
+            'null' \
+            '{{json .Config.Entrypoint}}'
+
+          # Labels is a map. Keys such as `io.hass.arch` contain dots, so Go
+          # template field chaining is incorrect; address each map key with
+          # `index`.
+          assert_image_field \
+            "label io.hass.arch" \
+            "aarch64" \
+            '{{index .Config.Labels "io.hass.arch"}}'
+
+          assert_image_field \
+            "label io.hass.version" \
+            "3.6.3-3" \
+            '{{index .Config.Labels "io.hass.version"}}'
+
+          assert_image_field \
+            "label io.hass.type" \
+            "app" \
+            '{{index .Config.Labels "io.hass.type"}}'
 
           echo "NATIVE_ARM64_BUILD=PASS"
 
