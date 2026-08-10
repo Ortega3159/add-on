@@ -1,0 +1,194 @@
+name: Wealthfolio AppArmor probe
+
+on:
+  push:
+    branches:
+      - chore/wealthfolio-apparmor-probe
+
+permissions:
+  contents: read
+
+jobs:
+  apparmor:
+    name: Verify AppArmor on GitHub-hosted Ubuntu
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Fetch exact commit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git init .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --depth=1 origin "${GITHUB_SHA}"
+          git checkout --detach FETCH_HEAD
+
+      - name: Inspect runner security environment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== Kernel ==="
+          uname -a
+
+          echo "=== Docker ==="
+          docker version
+          docker info --format 'SecurityOptions={{json .SecurityOptions}}'
+
+          echo "=== AppArmor ==="
+          test -r /sys/module/apparmor/parameters/enabled
+          printf 'kernel AppArmor enabled: '
+          cat /sys/module/apparmor/parameters/enabled
+
+          command -v apparmor_parser
+          command -v aa-status
+          sudo aa-status
+
+      - name: Run known-good wrapper under its real AppArmor profile
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cleanup() {
+            docker rm -f wf-aa-probe >/dev/null 2>&1 || true
+            sudo apparmor_parser -R tracker/apparmor.txt >/dev/null 2>&1 || true
+            [ -z "${DATA_DIR:-}" ] || rm -rf "$DATA_DIR"
+          }
+          trap cleanup EXIT
+
+          echo "=== Load profile ==="
+          sudo apparmor_parser -r -W tracker/apparmor.txt
+          sudo aa-status
+
+          echo "=== Build known-good wrapper ==="
+          docker build \
+            --pull \
+            --build-arg BUILD_VERSION=3.6.3-3 \
+            --build-arg BUILD_ARCH=amd64 \
+            -t wealthfolio-aa-probe:3.6.3-3 \
+            tracker
+
+          echo "=== Prepare fake Home Assistant /data ==="
+          DATA_DIR="$(mktemp -d)"
+
+          cat > "$DATA_DIR/options.json" <<'JSON'
+          {
+            "auth_password_hash": "$argon2id$v=19$m=19456,t=2,p=1$d2VhbHRoZm9saW8tY2ktc2FsdA$0S06Pkzh1UOb4foQLdD7/CHINd64HR17scQLwtJD0MU",
+            "cors_allow_origins": "http://127.0.0.1:8088",
+            "auth_token_ttl_minutes": 480
+          }
+          JSON
+
+          echo "=== Start wrapper with custom AppArmor profile ==="
+          docker run -d \
+            --name wf-aa-probe \
+            --init \
+            --security-opt apparmor=wealthfolio \
+            --tmpfs /tmp \
+            -p 127.0.0.1::8088 \
+            -v "$DATA_DIR:/data" \
+            -e WF_LISTEN_ADDR=0.0.0.0:8088 \
+            -e WF_DB_PATH=/data/wealthfolio/wealthfolio.db \
+            -e WF_AUTH_REQUIRED=true \
+            -e WF_MCP_ENABLED=false \
+            wealthfolio-aa-probe:3.6.3-3
+
+          APPARMOR_PROFILE="$(
+            docker inspect --format '{{.AppArmorProfile}}' wf-aa-probe
+          )"
+
+          printf 'Docker AppArmor profile: %s\n' "$APPARMOR_PROFILE"
+          test "$APPARMOR_PROFILE" = "wealthfolio"
+
+          PORT="$(
+            docker inspect \
+              --format '{{(index (index .NetworkSettings.Ports "8088/tcp") 0).HostPort}}' \
+              wf-aa-probe
+          )"
+
+          echo "=== Wait for health ==="
+          HEALTHY=false
+
+          for _ in $(seq 1 60); do
+            if curl --fail --silent \
+              "http://127.0.0.1:${PORT}/api/v1/healthz" >/dev/null; then
+              HEALTHY=true
+              break
+            fi
+
+            if [ "$(docker inspect --format '{{.State.Running}}' wf-aa-probe)" != "true" ]; then
+              break
+            fi
+
+            sleep 2
+          done
+
+          if [ "$HEALTHY" != "true" ]; then
+            echo "Known-good wrapper did not become healthy." >&2
+            docker logs wf-aa-probe || true
+            exit 1
+          fi
+
+          curl --fail --silent \
+            "http://127.0.0.1:${PORT}/" >/dev/null
+
+          echo "=== Verify child-profile transition ==="
+          SERVER_PID="$(
+            docker top wf-aa-probe -eo pid,args \
+              | awk '/\/usr\/local\/bin\/wealthfolio-server/ {print $1; exit}'
+          )"
+
+          test -n "$SERVER_PID"
+
+          CURRENT_PROFILE="$(sudo cat "/proc/${SERVER_PID}/attr/current")"
+          printf 'wealthfolio-server domain: %s\n' "$CURRENT_PROFILE"
+
+          case "$CURRENT_PROFILE" in
+            "wealthfolio//wealthfolio-server (enforce)")
+              ;;
+            *)
+              echo "Unexpected AppArmor domain for wealthfolio-server." >&2
+              exit 1
+              ;;
+          esac
+
+          echo "=== Ensure normal startup generated no denials ==="
+          NORMAL_DENIALS="$(
+            sudo dmesg \
+              | grep 'apparmor="DENIED"' \
+              | grep -E 'profile="wealthfolio(//wealthfolio-server)?"' \
+              || true
+          )"
+
+          if [ -n "$NORMAL_DENIALS" ]; then
+            printf '%s\n' "$NORMAL_DENIALS"
+            echo "Unexpected AppArmor denial during known-good operation." >&2
+            exit 1
+          fi
+
+          echo "=== Negative control: prove confinement is active ==="
+          if docker exec wf-aa-probe /bin/sh -c \
+            'touch /root/wealthfolio-apparmor-should-deny'; then
+            echo "Forbidden write unexpectedly succeeded." >&2
+            exit 1
+          fi
+
+          sleep 1
+
+          NEGATIVE_DENIALS="$(
+            sudo dmesg \
+              | grep 'apparmor="DENIED"' \
+              | grep -E 'profile="wealthfolio' \
+              || true
+          )"
+
+          if [ -z "$NEGATIVE_DENIALS" ]; then
+            echo "Negative operation failed, but no Wealthfolio AppArmor denial was recorded." >&2
+            exit 1
+          fi
+
+          printf '%s\n' "$NEGATIVE_DENIALS" | tail -20
+
+          echo "APPARMOR_PROBE=PASS"
