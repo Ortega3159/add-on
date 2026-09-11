@@ -127,6 +127,7 @@ profile wealthfolio flags=(attach_disconnected,mediate_deleted) {
 
     /tmp/ rw,
     /tmp/** rwk,
+    owner /var/tmp/* rw,
 
     # -----------------------------------------------------------------------
     # Name resolution
