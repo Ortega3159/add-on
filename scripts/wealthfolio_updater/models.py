@@ -19,6 +19,7 @@ _STRICT_WRAPPER_VERSION_RE = re.compile(
 )
 
 
+@dataclass(frozen=True, order=True)
 class SemVer:
     major: int
     minor: int
@@ -43,6 +44,7 @@ class SemVer:
         return f"{self.major}.{self.minor}.{self.patch}"
 
 
+@dataclass(frozen=True, order=True)
 class WrapperVersion:
     upstream: SemVer
     revision: int
@@ -91,16 +93,19 @@ class DistributionMode(str, Enum):
     PREBUILT = "PREBUILT"
 
 
+@dataclass(frozen=True)
 class CandidateSelection:
     version: SemVer | None
     policy: ReleasePolicy
 
 
+@dataclass(frozen=True)
 class PrebuiltBootstrap:
     upstream: SemVer
     candidate_wrapper: WrapperVersion
 
 
+@dataclass(frozen=True)
 class RepositoryState:
     upstream_version: SemVer
     upstream_digest: str

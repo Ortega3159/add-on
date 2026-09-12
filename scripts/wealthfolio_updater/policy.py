@@ -26,6 +26,7 @@ class PlanState(str, Enum):
     POLICY_BLOCK_MAJOR = "POLICY_BLOCK_MAJOR"
 
 
+@dataclass(frozen=True)
 class UpdatePlan:
     state: PlanState
     target_upstream: SemVer | None
