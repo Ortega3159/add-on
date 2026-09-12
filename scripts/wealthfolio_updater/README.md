@@ -9,8 +9,8 @@ not install updates into Home Assistant automatically.
 
 ## Current scope
 
-The implementation in this directory currently covers the policy and
-repository-integrity core only.
+The implementation in this directory currently covers the policy,
+repository-integrity and read-only upstream-discovery layers.
 
 Implemented:
 
@@ -24,12 +24,25 @@ Implemented:
 - strict updater-state JSON validation;
 - byte-exact repository edits with CRLF preservation;
 - stale Git base detection;
-- unit tests for the above behavior.
+- strict GitHub stable-release parsing;
+- guarded GitHub release pagination;
+- guarded read-only GitHub HTTP transport;
+- strict GHCR Bearer-challenge validation;
+- anonymous pull-only GHCR token acquisition;
+- guarded GHCR manifest transport;
+- raw OCI-index digest verification;
+- strict multi-platform OCI-index inspection;
+- exact `linux/amd64` and `linux/arm64` runtime-platform validation;
+- fail-closed handling of OCI attestation descriptors;
+- offline unit tests for all implemented behavior.
+
+The read-only network path has also been smoke-tested against the real
+upstream GitHub and GHCR endpoints. Those live checks are separate from
+the offline unit-test suite.
 
 Not implemented yet:
 
-- GitHub release discovery;
-- GHCR manifest and platform validation;
+- GitHub Actions orchestration;
 - Docker image builds;
 - runtime compatibility tests;
 - AppArmor compatibility tests;
@@ -63,15 +76,32 @@ wealthfolio_updater/
 ├── git_guard.py
 │   Full-SHA validation and stale-base detection.
 │
+├── discovery.py
+│   Strict GitHub release parsing and pagination.
+│
+├── github_http.py
+│   Guarded read-only transport for the fixed upstream GitHub releases
+│   endpoint.
+│
+├── oci.py
+│   Raw OCI-index digest verification, platform validation and
+│   attestation-descriptor inspection.
+│
+├── ghcr_http.py
+│   Guarded anonymous pull-only GHCR challenge, token and manifest
+│   transport.
+│
 ├── updater.py
 │   Stable public facade re-exporting the supported package API.
 │
 └── tests/
-    Unit tests for the policy and integrity core.
+    Offline unit tests for the implemented updater layers.
 ```
 
-Future network discovery belongs in its own module rather than being
-mixed into repository parsing or policy logic.
+Network transport remains separated from repository parsing and policy
+logic. The transport modules use fixed upstream destinations and
+fail-closed validation rather than following arbitrary discovery or
+authentication destinations supplied by remote responses.
 
 ## Repository states
 
@@ -338,7 +368,8 @@ or force-pushing.
 
 ## Testing
 
-The policy core uses only the Python standard library.
+The updater implementation currently uses only the Python standard
+library.
 
 Run:
 
@@ -348,7 +379,7 @@ python3 -m unittest discover \
   -v
 ```
 
-The current WU-1 baseline contains 72 tests.
+The current WU-2 baseline contains 144 offline unit tests.
 
 For structural changes, also verify module compilation and importability:
 
@@ -358,40 +389,61 @@ python3 -m py_compile \
   scripts/wealthfolio_updater/repository.py \
   scripts/wealthfolio_updater/policy.py \
   scripts/wealthfolio_updater/git_guard.py \
+  scripts/wealthfolio_updater/discovery.py \
+  scripts/wealthfolio_updater/github_http.py \
+  scripts/wealthfolio_updater/oci.py \
+  scripts/wealthfolio_updater/ghcr_http.py \
   scripts/wealthfolio_updater/updater.py
 ```
 
 and:
 
 ```bash
-python3 - <<'PY'
+python3 - <<'CHECK'
 import scripts.wealthfolio_updater.models
 import scripts.wealthfolio_updater.repository
 import scripts.wealthfolio_updater.policy
 import scripts.wealthfolio_updater.git_guard
+import scripts.wealthfolio_updater.discovery
+import scripts.wealthfolio_updater.github_http
+import scripts.wealthfolio_updater.oci
+import scripts.wealthfolio_updater.ghcr_http
 import scripts.wealthfolio_updater.updater
 
 print("all module imports = PASS")
-PY
+CHECK
 ```
 
-No unit test in this work unit requires Internet, Docker, GitHub or GHCR.
+The unit-test suite requires no Internet, Docker, GitHub or GHCR access.
+
+Separate live smoke checks have verified the read-only network path
+against the real upstream services, including:
+
+- stable GitHub release discovery;
+- the current repository upstream `3.6.3`;
+- the review-required upstream candidate `3.8.0`;
+- exact GHCR OCI-index digest matching;
+- exact `linux/amd64` and `linux/arm64` manifest discovery.
+
+Live smoke checks are evidence for the transport contract; they are not
+a substitute for the offline unit-test suite.
 
 ## Current development sequence
 
-The intended sequence after this policy-core work is:
+The policy core and read-only upstream-discovery work are complete.
 
-1. read-only upstream discovery;
-2. audit-only GitHub Actions orchestration;
-3. functional runtime harness;
-4. AppArmor harness;
-5. exact tested-artifact preservation;
-6. integration of updater infrastructure;
-7. GHCR namespace/public-access bootstrap;
-8. prebuilt `3.6.3-5` bootstrap;
-9. real pre-upgrade checkpoint;
-10. reviewed Wealthfolio 3.8.0 update;
-11. scheduled production updater.
+The remaining intended sequence is:
+
+1. audit-only GitHub Actions orchestration;
+2. functional runtime harness;
+3. AppArmor harness;
+4. exact tested-artifact preservation;
+5. integration of updater infrastructure;
+6. GHCR namespace/public-access bootstrap;
+7. prebuilt `3.6.3-5` bootstrap;
+8. real pre-upgrade checkpoint;
+9. reviewed Wealthfolio 3.8.0 update;
+10. scheduled production updater.
 
 Each stage must be independently verified before the next changes the
 live App update path.
