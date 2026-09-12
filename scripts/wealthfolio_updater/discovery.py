@@ -156,3 +156,161 @@ def parse_github_release_page(
     releases.sort(key=lambda release: release.version)
 
     return tuple(releases)
+
+
+@dataclass(frozen=True)
+class GitHubReleasePageResponse:
+    body: bytes
+    link_header: str | None
+
+
+def _has_next_link(link_header: str | None) -> bool:
+    if link_header is None:
+        return False
+
+    if type(link_header) is not str:
+        raise TypeError("Link header must be a string or None")
+
+    if not link_header.strip():
+        raise ValueError("Link header must not be empty")
+
+    entries = link_header.split(",")
+    found_next = False
+
+    for raw_entry in entries:
+        entry = raw_entry.strip()
+
+        if not entry:
+            raise ValueError("malformed Link header")
+
+        parts = [
+            part.strip()
+            for part in entry.split(";")
+        ]
+
+        if len(parts) < 2:
+            raise ValueError("malformed Link header")
+
+        target = parts[0]
+
+        if (
+            len(target) < 3
+            or not target.startswith("<")
+            or not target.endswith(">")
+        ):
+            raise ValueError("malformed Link header")
+
+        relations: list[str] = []
+        rel_parameter_count = 0
+
+        for parameter in parts[1:]:
+            if not parameter:
+                raise ValueError("malformed Link header")
+
+            if parameter.startswith("rel="):
+                rel_parameter_count += 1
+
+                if rel_parameter_count > 1:
+                    raise ValueError(
+                        "multiple rel parameters in Link entry"
+                    )
+
+                value = parameter[4:]
+
+                if (
+                    len(value) < 2
+                    or not value.startswith('"')
+                    or not value.endswith('"')
+                ):
+                    raise ValueError("malformed Link header")
+
+                tokens = [
+                    relation
+                    for relation in value[1:-1].split()
+                    if relation
+                ]
+
+                if len(tokens) != len(set(tokens)):
+                    raise ValueError(
+                        "duplicate relation token in Link entry"
+                    )
+
+                relations.extend(tokens)
+
+        if not relations:
+            raise ValueError(
+                "Link entry is missing rel parameter"
+            )
+
+        if "next" in relations:
+            if found_next:
+                raise ValueError(
+                    "Link header contains multiple next relations"
+                )
+
+            found_next = True
+
+    return found_next
+
+def discover_github_releases(
+    fetch_page,
+    *,
+    max_pages: int = 100,
+) -> tuple[UpstreamRelease, ...]:
+    if type(max_pages) is not int or max_pages <= 0:
+        raise ValueError(
+            "max_pages must be a positive integer"
+        )
+
+    releases: list[UpstreamRelease] = []
+    seen_versions: set[SemVer] = set()
+    seen_release_ids: set[int] = set()
+
+    page = 1
+
+    while True:
+        if page > max_pages:
+            raise ValueError(
+                "GitHub release discovery exceeded page limit"
+            )
+
+        response = fetch_page(page)
+
+        if not isinstance(
+            response,
+            GitHubReleasePageResponse,
+        ):
+            raise TypeError(
+                "fetch_page must return "
+                "GitHubReleasePageResponse"
+            )
+
+        page_releases = parse_github_release_page(
+            response.body
+        )
+
+        for release in page_releases:
+            if release.version in seen_versions:
+                raise ValueError(
+                    "duplicate stable release version "
+                    f"across pages: {release.version}"
+                )
+
+            if release.release_id in seen_release_ids:
+                raise ValueError(
+                    "duplicate release id across pages: "
+                    f"{release.release_id}"
+                )
+
+            seen_versions.add(release.version)
+            seen_release_ids.add(release.release_id)
+            releases.append(release)
+
+        if not _has_next_link(response.link_header):
+            break
+
+        page += 1
+
+    releases.sort(key=lambda release: release.version)
+
+    return tuple(releases)
