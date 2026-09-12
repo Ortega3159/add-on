@@ -453,5 +453,112 @@ class OciIndexHardeningTests(unittest.TestCase):
             )
 
 
+
+class OciIndexHardeningTests(unittest.TestCase):
+    def test_invalid_descriptor_digest_is_rejected(self):
+        descriptors = json.loads(make_index().decode())["manifests"]
+        descriptors[0]["digest"] = "sha256:abc"
+        body = make_index(descriptors=descriptors)
+
+        with self.assertRaises(ValueError):
+            inspect_oci_index(
+                body=body,
+                content_type=OCI_IMAGE_INDEX_MEDIA_TYPE,
+                content_digest=digest_of(body),
+            )
+
+    def test_boolean_descriptor_size_is_rejected(self):
+        descriptors = json.loads(make_index().decode())["manifests"]
+        descriptors[0]["size"] = True
+        body = make_index(descriptors=descriptors)
+
+        with self.assertRaises(ValueError):
+            inspect_oci_index(
+                body=body,
+                content_type=OCI_IMAGE_INDEX_MEDIA_TYPE,
+                content_digest=digest_of(body),
+            )
+
+    def test_unexpected_operating_system_is_rejected(self):
+        descriptors = json.loads(make_index().decode())["manifests"]
+        descriptors[0]["platform"]["os"] = "windows"
+        body = make_index(descriptors=descriptors)
+
+        with self.assertRaises(ValueError):
+            inspect_oci_index(
+                body=body,
+                content_type=OCI_IMAGE_INDEX_MEDIA_TYPE,
+                content_digest=digest_of(body),
+            )
+
+    def test_manifests_must_be_array(self):
+        body = json.dumps(
+            {
+                "schemaVersion": 2,
+                "mediaType": OCI_IMAGE_INDEX_MEDIA_TYPE,
+                "manifests": {},
+            }
+        ).encode()
+
+        with self.assertRaises(ValueError):
+            inspect_oci_index(
+                body=body,
+                content_type=OCI_IMAGE_INDEX_MEDIA_TYPE,
+                content_digest=digest_of(body),
+            )
+
+    def test_descriptor_must_be_object(self):
+        body = make_index(descriptors=["not-an-object"])
+
+        with self.assertRaises(ValueError):
+            inspect_oci_index(
+                body=body,
+                content_type=OCI_IMAGE_INDEX_MEDIA_TYPE,
+                content_digest=digest_of(body),
+            )
+
+    def test_invalid_utf8_and_json_are_rejected(self):
+        for body in (b"\xff", b"{"):
+            with self.subTest(body=body):
+                with self.assertRaises(ValueError):
+                    inspect_oci_index(
+                        body=body,
+                        content_type=OCI_IMAGE_INDEX_MEDIA_TYPE,
+                        content_digest=digest_of(body),
+                    )
+
+    def test_attestations_are_optional(self):
+        descriptors = json.loads(make_index().decode())["manifests"]
+        descriptors = [
+            descriptor
+            for descriptor in descriptors
+            if descriptor["platform"]["os"] == "linux"
+        ]
+
+        body = make_index(descriptors=descriptors)
+
+        inspection = inspect_oci_index(
+            body=body,
+            content_type=OCI_IMAGE_INDEX_MEDIA_TYPE,
+            content_digest=digest_of(body),
+        )
+
+        self.assertEqual(inspection.amd64_digest, AMD64_DIGEST)
+        self.assertEqual(inspection.arm64_digest, ARM64_DIGEST)
+        self.assertEqual(inspection.attestation_count, 0)
+
+    def test_duplicate_descriptor_digest_is_rejected(self):
+        descriptors = json.loads(make_index().decode())["manifests"]
+        descriptors[2]["digest"] = AMD64_DIGEST
+        body = make_index(descriptors=descriptors)
+
+        with self.assertRaises(ValueError):
+            inspect_oci_index(
+                body=body,
+                content_type=OCI_IMAGE_INDEX_MEDIA_TYPE,
+                content_digest=digest_of(body),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
