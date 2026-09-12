@@ -10,7 +10,8 @@ not install updates into Home Assistant automatically.
 ## Current scope
 
 The implementation in this directory currently covers the policy,
-repository-integrity and read-only upstream-discovery layers.
+repository-integrity, read-only upstream-discovery and audit-only
+orchestration layers.
 
 Implemented:
 
@@ -34,6 +35,15 @@ Implemented:
 - strict multi-platform OCI-index inspection;
 - exact `linux/amd64` and `linux/arm64` runtime-platform validation;
 - fail-closed handling of OCI attestation descriptors;
+- audit composition that keeps latest stable release, normal candidate,
+  effective plan and inspected OCI target distinct;
+- exact checkout-SHA and clean-worktree validation before repository or
+  network audit work;
+- deterministic machine-readable JSON and human-readable Markdown audit
+  reports;
+- a thin audit-only CLI with explicit technical-failure semantics;
+- audit-only GitHub Actions orchestration with least-privilege permissions
+  and immutable action pins;
 - offline unit tests for all implemented behavior.
 
 The read-only network path has also been smoke-tested against the real
@@ -42,7 +52,6 @@ the offline unit-test suite.
 
 Not implemented yet:
 
-- GitHub Actions orchestration;
 - Docker image builds;
 - runtime compatibility tests;
 - AppArmor compatibility tests;
@@ -91,17 +100,116 @@ wealthfolio_updater/
 │   Guarded anonymous pull-only GHCR challenge, token and manifest
 │   transport.
 │
+├── audit.py
+│   Pure audit composition: repository state, release selection, effective
+│   plan and exact OCI target.
+│
+├── audit_execution.py
+│   Checkout identity, clean-worktree and fixed-path repository guards,
+│   followed by GitHub/GHCR audit execution.
+│
+├── audit_report.py
+│   Explicit schema-1 JSON serialization and human-readable Markdown
+│   rendering from one validated AuditResult.
+│
+├── audit_cli.py
+│   Thin command-line boundary joining execution and reporting without
+│   adding update or publication behavior.
+│
 ├── updater.py
 │   Stable public facade re-exporting the supported package API.
 │
 └── tests/
-    Offline unit tests for the implemented updater layers.
+    Offline unit and workflow-contract tests for the implemented updater
+    layers.
 ```
 
 Network transport remains separated from repository parsing and policy
 logic. The transport modules use fixed upstream destinations and
 fail-closed validation rather than following arbitrary discovery or
 authentication destinations supplied by remote responses.
+
+## Audit-only GitHub Actions orchestration
+
+WU-3 adds a read-only audit path. It does not build, publish, modify or
+install anything.
+
+The audit execution order is:
+
+```text
+exact event Git SHA
+      |
+      v
+Gate 0: checkout / repository integrity
+  - HEAD must match the expected full Git SHA
+  - the Git worktree must be clean
+  - repository state must validate
+      |
+      v
+Gate 1: stable upstream discovery and planning
+  - discover stable GitHub releases
+  - preserve latest stable and normal candidate separately
+  - construct the effective audit-only plan
+      |
+      v
+Gate 2: exact upstream OCI identity
+  - inspect only the OCI version selected by the effective plan
+  - validate linux/amd64 and linux/arm64 runtime manifests
+  - when inspecting the current upstream, require its OCI-index digest to
+    match the repository pin exactly
+      |
+      v
+AUDIT_ONLY result
+```
+
+Policy outcomes are valid audit conclusions rather than workflow failures.
+Examples include `PREBUILT_BOOTSTRAP`, `NOOP`, `CANDIDATE_AUTO`,
+`CANDIDATE_REVIEW_REQUIRED` and `POLICY_BLOCK_MAJOR`.
+
+Technical or integrity failures remain fail closed. Examples include a stale
+or malformed Git SHA, a dirty checkout, invalid repository state, malformed
+GitHub/GHCR responses, no stable releases, invalid OCI metadata or a current
+OCI digest that does not match the repository pin.
+
+The CLI executes the audit once and derives both reports from the same
+validated result:
+
+- compact schema-1 JSON on standard output;
+- Markdown written to the requested summary path.
+
+The GitHub Actions workflow is
+`.github/workflows/wealthfolio-updater-audit.yml`.
+
+It currently:
+
+- grants only `contents: read`;
+- checks out the exact `${{ github.sha }}`;
+- uses `fetch-depth: 1`;
+- disables persisted checkout credentials;
+- pins `actions/checkout` and `actions/setup-python` to full commit SHAs;
+- uses Python `3.14.2`;
+- runs the complete offline unit-test suite before the live audit;
+- writes the human-readable result to the GitHub Step Summary.
+
+The branch-specific `push` trigger for `feat/wealthfolio-updater` is a
+temporary bootstrap mechanism for the first remote workflow validation.
+`workflow_dispatch` is also declared, but manual dispatch becomes useful
+once the workflow exists on the default branch. The branch-specific
+bootstrap trigger must be removed or reevaluated when WU-3 is integrated.
+
+WU-3 does not provide:
+
+- Docker builds;
+- image publication;
+- repository mutation;
+- approval input;
+- scheduled execution;
+- access to Home Assistant OS, Tailscale, the home network or real financial
+  data.
+
+The workflow and all WU-3 code are currently validated locally. The first
+real GitHub Actions run remains pending until this work unit is committed
+and pushed.
 
 ## Repository states
 
@@ -379,7 +487,7 @@ python3 -m unittest discover \
   -v
 ```
 
-The current WU-2 baseline contains 144 offline unit tests.
+The current WU-3 baseline contains 200 offline unit tests.
 
 For structural changes, also verify module compilation and importability:
 
@@ -393,6 +501,10 @@ python3 -m py_compile \
   scripts/wealthfolio_updater/github_http.py \
   scripts/wealthfolio_updater/oci.py \
   scripts/wealthfolio_updater/ghcr_http.py \
+  scripts/wealthfolio_updater/audit.py \
+  scripts/wealthfolio_updater/audit_execution.py \
+  scripts/wealthfolio_updater/audit_report.py \
+  scripts/wealthfolio_updater/audit_cli.py \
   scripts/wealthfolio_updater/updater.py
 ```
 
@@ -408,6 +520,10 @@ import scripts.wealthfolio_updater.discovery
 import scripts.wealthfolio_updater.github_http
 import scripts.wealthfolio_updater.oci
 import scripts.wealthfolio_updater.ghcr_http
+import scripts.wealthfolio_updater.audit
+import scripts.wealthfolio_updater.audit_execution
+import scripts.wealthfolio_updater.audit_report
+import scripts.wealthfolio_updater.audit_cli
 import scripts.wealthfolio_updater.updater
 
 print("all module imports = PASS")
@@ -428,13 +544,17 @@ against the real upstream services, including:
 Live smoke checks are evidence for the transport contract; they are not
 a substitute for the offline unit-test suite.
 
+The WU-3 GitHub Actions orchestration has not yet had its first remote run.
+That validation occurs only after the reviewed WU-3 commit is pushed.
+
 ## Current development sequence
 
-The policy core and read-only upstream-discovery work are complete.
+The policy core, read-only upstream discovery and local implementation of
+the audit-only GitHub Actions orchestration are complete.
 
 The remaining intended sequence is:
 
-1. audit-only GitHub Actions orchestration;
+1. first remote WU-3 workflow validation;
 2. functional runtime harness;
 3. AppArmor harness;
 4. exact tested-artifact preservation;
