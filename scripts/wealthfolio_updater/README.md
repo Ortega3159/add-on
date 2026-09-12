@@ -207,9 +207,9 @@ WU-3 does not provide:
 - access to Home Assistant OS, Tailscale, the home network or real financial
   data.
 
-The workflow and all WU-3 code are currently validated locally. The first
-real GitHub Actions run remains pending until this work unit is committed
-and pushed.
+The workflow and all WU-3 code have been validated locally and remotely.
+The first real GitHub Actions validation completed successfully on commit
+`6debc6b3f58c3c4064b3e265bae5496596d04dfe` in run `34682251707`.
 
 ## Repository states
 
@@ -544,26 +544,26 @@ against the real upstream services, including:
 Live smoke checks are evidence for the transport contract; they are not
 a substitute for the offline unit-test suite.
 
-The WU-3 GitHub Actions orchestration has not yet had its first remote run.
-That validation occurs only after the reviewed WU-3 commit is pushed.
+WU-3 GitHub Actions orchestration has completed its first remote
+validation successfully. The run executed the full 200-test offline suite
+and the read-only live audit against the exact reviewed commit.
 
 ## Current development sequence
 
-The policy core, read-only upstream discovery and local implementation of
-the audit-only GitHub Actions orchestration are complete.
+The policy core, read-only upstream discovery and audit-only GitHub Actions
+orchestration are complete.
 
 The remaining intended sequence is:
 
-1. first remote WU-3 workflow validation;
-2. functional runtime harness;
-3. AppArmor harness;
-4. exact tested-artifact preservation;
-5. integration of updater infrastructure;
-6. GHCR namespace/public-access bootstrap;
-7. prebuilt `3.6.3-5` bootstrap;
-8. real pre-upgrade checkpoint;
-9. reviewed Wealthfolio 3.8.0 update;
-10. scheduled production updater.
+1. functional runtime harness;
+2. AppArmor harness;
+3. exact tested-artifact preservation;
+4. integration of updater infrastructure;
+5. GHCR namespace/public-access bootstrap;
+6. prebuilt `3.6.3-5` bootstrap;
+7. real pre-upgrade checkpoint;
+8. reviewed Wealthfolio 3.8.0 update;
+9. scheduled production updater.
 
 Each stage must be independently verified before the next changes the
 live App update path.
