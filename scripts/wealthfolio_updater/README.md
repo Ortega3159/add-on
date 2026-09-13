@@ -10,8 +10,8 @@ not install updates into Home Assistant automatically.
 ## Current scope
 
 The implementation in this directory currently covers the policy,
-repository-integrity, read-only upstream-discovery and audit-only
-orchestration layers.
+repository-integrity, read-only upstream-discovery, audit-only
+orchestration and initial native-amd64 runtime-build layers.
 
 Implemented:
 
@@ -44,6 +44,12 @@ Implemented:
 - a thin audit-only CLI with explicit technical-failure semantics;
 - audit-only GitHub Actions orchestration with least-privilege permissions
   and immutable action pins;
+- a shell-free, timeout-bounded Docker command boundary for runtime
+  validation work;
+- controlled native `linux/amd64` wrapper builds derived from validated
+  `LOCAL_BUILD` repository state;
+- fail-closed inspection of built wrapper image identity, OS/architecture,
+  `/run.sh` command and Home Assistant image labels;
 - offline unit tests for all implemented behavior.
 
 The read-only network path has also been smoke-tested against the real
@@ -52,10 +58,12 @@ the offline unit-test suite.
 
 Not implemented yet:
 
-- Docker image builds;
-- runtime compatibility tests;
+- fresh container runtime/bootstrap validation;
+- authenticated functional-runtime workload tests;
+- restart/persistence validation;
+- OLD -> NEW migration tests;
 - AppArmor compatibility tests;
-- persistence and OLD -> NEW migration tests;
+- native arm64 wrapper build/runtime validation;
 - exact image-artifact promotion;
 - GHCR publication;
 - repository publication;
@@ -115,6 +123,10 @@ wealthfolio_updater/
 ├── audit_cli.py
 │   Thin command-line boundary joining execution and reporting without
 │   adding update or publication behavior.
+│
+├── runtime_docker.py
+│   Shell-free Docker execution boundary plus controlled native-amd64
+│   wrapper build and fail-closed built-image contract inspection.
 │
 ├── updater.py
 │   Stable public facade re-exporting the supported package API.
@@ -459,7 +471,10 @@ DECIDE / PUBLISH
 A PLAN candidate is not equivalent to a publishable or validated
 candidate.
 
-The runtime and publication gates are implemented in later work units.
+The native-amd64 wrapper build and built-image inspection foundation is
+now implemented. Fresh-runtime, functional-workload, persistence,
+migration, AppArmor, exact-artifact and publication gates remain in later
+work units.
 
 ## Stale-base protection
 
@@ -487,7 +502,12 @@ python3 -m unittest discover \
   -v
 ```
 
-The current WU-3 baseline contains 200 offline unit tests.
+The current development baseline contains 223 offline unit tests.
+
+Nineteen of those tests cover the WU-4A Docker boundary, controlled
+native-amd64 build construction and built-image inspection. They mock the
+Docker subprocess boundary and therefore keep the complete unit-test suite
+offline and independent of a Docker daemon.
 
 For structural changes, also verify module compilation and importability:
 
@@ -505,6 +525,7 @@ python3 -m py_compile \
   scripts/wealthfolio_updater/audit_execution.py \
   scripts/wealthfolio_updater/audit_report.py \
   scripts/wealthfolio_updater/audit_cli.py \
+  scripts/wealthfolio_updater/runtime_docker.py \
   scripts/wealthfolio_updater/updater.py
 ```
 
@@ -524,6 +545,7 @@ import scripts.wealthfolio_updater.audit
 import scripts.wealthfolio_updater.audit_execution
 import scripts.wealthfolio_updater.audit_report
 import scripts.wealthfolio_updater.audit_cli
+import scripts.wealthfolio_updater.runtime_docker
 import scripts.wealthfolio_updater.updater
 
 print("all module imports = PASS")
@@ -544,18 +566,59 @@ against the real upstream services, including:
 Live smoke checks are evidence for the transport contract; they are not
 a substitute for the offline unit-test suite.
 
+WU-4A has also completed its first local Docker smoke validation on native
+`linux/amd64`.
+
+The validated `LOCAL_BUILD` repository state built wrapper `3.6.3-4` with
+the local test tag `wealthfolio-runtime-test:3.6.3-4-amd64`.
+
+The resulting local Docker image ID was
+`sha256:46c9d73474c7c4c995949aad91c5bea787a2dce47b72cb723cf32e35031ae382`.
+
+The runtime-Docker inspection layer verified:
+
+- operating system `linux`;
+- architecture `amd64`;
+- command `["/run.sh"]`;
+- `io.hass.version=3.6.3-4`;
+- `io.hass.arch=amd64`;
+- `io.hass.type=app`.
+
+That image ID is evidence for this local build only. It is not a
+reproducible publication identity and does not establish that a future
+published artifact is byte-identical to the tested image. Exact
+tested-artifact preservation remains a later work unit.
+
+No container or persistent volume was created by this WU-4A smoke. It
+therefore does not yet demonstrate application startup, Home Assistant
+bootstrap, authentication, SQLite behavior, functional API behavior,
+persistence or migration compatibility.
+
 WU-3 GitHub Actions orchestration has completed its first remote
-validation successfully. The run executed the full 200-test offline suite
-and the read-only live audit against the exact reviewed commit.
+validation successfully. The run executed the then-current 200-test
+offline suite and the read-only live audit against the exact reviewed
+commit.
 
 ## Current development sequence
 
 The policy core, read-only upstream discovery and audit-only GitHub Actions
 orchestration are complete.
 
+WU-4 functional-runtime work is currently split as follows:
+
+A. native amd64 wrapper build + image inspection: complete
+B. fresh runtime/bootstrap: next
+C. authenticated functional workload: pending
+D. restart/persistence: pending
+E. OLD -> NEW migration: pending
+F. GitHub Actions orchestration: pending
+
+WU-4A does not imply that Wealthfolio has yet been started or exercised by
+the runtime harness.
+
 The remaining intended sequence is:
 
-1. functional runtime harness;
+1. complete WU-4 functional runtime harness;
 2. AppArmor harness;
 3. exact tested-artifact preservation;
 4. integration of updater infrastructure;
