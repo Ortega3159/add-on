@@ -68,7 +68,7 @@ class SequenceOpener:
         return step
 
 
-def challenge_error():
+def challenge_error(*, fp=None):
     headers = Message()
     headers["WWW-Authenticate"] = (
         'Bearer '
@@ -76,6 +76,11 @@ def challenge_error():
         'service="ghcr.io",'
         'scope="repository:wealthfolio/wealthfolio:pull"'
     )
+
+    if fp is None:
+        fp = io.BytesIO(
+            b'{"errors":[{"code":"UNAUTHORIZED"}]}'
+        )
 
     return HTTPError(
         (
@@ -85,9 +90,7 @@ def challenge_error():
         401,
         "Unauthorized",
         headers,
-        io.BytesIO(
-            b'{"errors":[{"code":"UNAUTHORIZED"}]}'
-        ),
+        fp,
     )
 
 
@@ -376,6 +379,107 @@ class GhcrTransportTests(unittest.TestCase):
                         SemVer.parse("3.8.0"),
                         opener=opener,
                     )
+
+
+class GhcrHttpErrorCloseTests(unittest.TestCase):
+    def test_successful_auth_challenge_is_closed(self):
+        challenge_fp = io.BytesIO(
+            b'{"errors":[{"code":"UNAUTHORIZED"}]}'
+        )
+
+        opener = SequenceOpener(
+            challenge_error(fp=challenge_fp),
+            token_response(),
+            manifest_response(),
+        )
+
+        fetch_ghcr_manifest(
+            SemVer.parse("3.8.0"),
+            opener=opener,
+        )
+
+        self.assertTrue(challenge_fp.closed)
+
+    def test_unexpected_initial_http_error_is_closed(self):
+        error_fp = io.BytesIO(b"not-found")
+
+        opener = SequenceOpener(
+            HTTPError(
+                "https://ghcr.io/",
+                404,
+                "Not Found",
+                Message(),
+                error_fp,
+            )
+        )
+
+        with self.assertRaisesRegex(
+            GhcrTransportError,
+            "expected authentication challenge",
+        ):
+            fetch_ghcr_manifest(
+                SemVer.parse("3.8.0"),
+                opener=opener,
+            )
+
+        self.assertTrue(error_fp.closed)
+
+    def test_token_http_error_is_closed(self):
+        token_fp = io.BytesIO(b"token-error")
+
+        opener = SequenceOpener(
+            challenge_error(),
+            HTTPError(
+                "https://ghcr.io/token",
+                500,
+                "Server Error",
+                Message(),
+                token_fp,
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            GhcrTransportError,
+            "token request failed",
+        ):
+            fetch_ghcr_manifest(
+                SemVer.parse("3.8.0"),
+                opener=opener,
+            )
+
+        self.assertTrue(token_fp.closed)
+
+    def test_authenticated_manifest_http_error_is_closed(self):
+        manifest_fp = io.BytesIO(
+            b"manifest-error"
+        )
+
+        opener = SequenceOpener(
+            challenge_error(),
+            token_response(),
+            HTTPError(
+                (
+                    "https://ghcr.io/v2/"
+                    "wealthfolio/wealthfolio/"
+                    "manifests/3.8.0"
+                ),
+                500,
+                "Server Error",
+                Message(),
+                manifest_fp,
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            GhcrTransportError,
+            "manifest request failed",
+        ):
+            fetch_ghcr_manifest(
+                SemVer.parse("3.8.0"),
+                opener=opener,
+            )
+
+        self.assertTrue(manifest_fp.closed)
 
 
 if __name__ == "__main__":

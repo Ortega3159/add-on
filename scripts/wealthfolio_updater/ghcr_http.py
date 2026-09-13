@@ -311,31 +311,34 @@ def fetch_ghcr_manifest(
             )
 
     except HTTPError as exc:
-        if exc.code != 401:
-            raise GhcrTransportError(
-                "expected authentication challenge, "
-                f"got HTTP {exc.code}"
-            ) from exc
-
-        authenticate = (
-            exc.headers.get("WWW-Authenticate")
-            if exc.headers is not None
-            else None
-        )
-
-        if authenticate is None:
-            raise GhcrTransportError(
-                "401 response missing WWW-Authenticate"
-            ) from exc
-
         try:
-            challenge = parse_www_authenticate(
-                authenticate
+            if exc.code != 401:
+                raise GhcrTransportError(
+                    "expected authentication challenge, "
+                    f"got HTTP {exc.code}"
+                ) from exc
+
+            authenticate = (
+                exc.headers.get("WWW-Authenticate")
+                if exc.headers is not None
+                else None
             )
-        except (TypeError, ValueError) as challenge_exc:
-            raise GhcrTransportError(
-                "invalid GHCR WWW-Authenticate challenge"
-            ) from challenge_exc
+
+            if authenticate is None:
+                raise GhcrTransportError(
+                    "401 response missing WWW-Authenticate"
+                ) from exc
+
+            try:
+                challenge = parse_www_authenticate(
+                    authenticate
+                )
+            except (TypeError, ValueError) as challenge_exc:
+                raise GhcrTransportError(
+                    "invalid GHCR WWW-Authenticate challenge"
+                ) from challenge_exc
+        finally:
+            exc.close()
 
     except GhcrTransportError:
         raise
@@ -405,9 +408,12 @@ def fetch_ghcr_manifest(
         raise
 
     except HTTPError as exc:
-        raise GhcrTransportError(
-            f"token request failed: HTTP {exc.code}"
-        ) from exc
+        try:
+            raise GhcrTransportError(
+                f"token request failed: HTTP {exc.code}"
+            ) from exc
+        finally:
+            exc.close()
 
     except (URLError, TimeoutError, OSError) as exc:
         raise GhcrTransportError(
@@ -473,9 +479,12 @@ def fetch_ghcr_manifest(
         raise
 
     except HTTPError as exc:
-        raise GhcrTransportError(
-            f"manifest request failed: HTTP {exc.code}"
-        ) from exc
+        try:
+            raise GhcrTransportError(
+                f"manifest request failed: HTTP {exc.code}"
+            ) from exc
+        finally:
+            exc.close()
 
     except (URLError, TimeoutError, OSError) as exc:
         raise GhcrTransportError(
