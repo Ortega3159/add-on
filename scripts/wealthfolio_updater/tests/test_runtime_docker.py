@@ -800,5 +800,1487 @@ class DockerImageInspectionTests(unittest.TestCase):
                     )
 
 
+class RuntimeDataBootstrapTests(unittest.TestCase):
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.run_docker"
+    )
+    def test_create_runtime_data_volume_uses_owned_labels(
+        self,
+        docker_runner,
+    ):
+        docker_runner.return_value = b"runtime-data-123\n"
+
+        result = runtime_docker.create_runtime_data_volume()
+
+        self.assertEqual(
+            result.name,
+            "runtime-data-123",
+        )
+
+        docker_runner.assert_called_once_with(
+            [
+                "volume",
+                "create",
+                "--label",
+                "io.wealthfolio.runtime-test=true",
+                "--label",
+                "io.wealthfolio.runtime-test.role=data",
+            ],
+            timeout_seconds=30,
+            operation="create runtime data volume",
+        )
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.run_docker"
+    )
+    def test_create_runtime_data_volume_rejects_invalid_name(
+        self,
+        docker_runner,
+    ):
+        invalid_outputs = (
+            b"",
+            b"\n",
+            b"bad volume name\n",
+            b"one\ntwo\n",
+            b"\xff\n",
+        )
+
+        for output in invalid_outputs:
+            with self.subTest(output=output):
+                docker_runner.reset_mock()
+                docker_runner.return_value = output
+
+                with self.assertRaises(
+                    DockerRuntimeError
+                ):
+                    runtime_docker.create_runtime_data_volume()
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.run_docker"
+    )
+    def test_seed_runtime_options_uses_validated_image_id(
+        self,
+        docker_runner,
+    ):
+        image_id = "sha256:" + ("a" * 64)
+
+        volume = runtime_docker.RuntimeDataVolume(
+            name="runtime-data-123",
+        )
+
+        image = runtime_docker.WrapperImageInspection(
+            image_id=image_id,
+            tag=(
+                "wealthfolio-runtime-test:"
+                "3.6.3-4-amd64"
+            ),
+            os="linux",
+            architecture="amd64",
+            command=("/run.sh",),
+            hass_version="3.6.3-4",
+            hass_arch="amd64",
+            hass_type="app",
+        )
+
+        options_bytes = (
+            b'{"auth_password_hash":"$literal",'
+            b'"cors_allow_origins":["http://127.0.0.1"],'
+            b'"auth_token_ttl_minutes":480}\n'
+        )
+
+        runtime_docker.seed_runtime_options(
+            volume=volume,
+            image=image,
+            options_bytes=options_bytes,
+        )
+
+        docker_runner.assert_called_once_with(
+            [
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--mount",
+                (
+                    "type=volume,"
+                    "source=runtime-data-123,"
+                    "destination=/data"
+                ),
+                "--entrypoint",
+                "/bin/sh",
+                "--interactive",
+                image_id,
+                "-c",
+                (
+                    "umask 077\n"
+                    "cat > /data/options.json\n"
+                ),
+            ],
+            input_bytes=options_bytes,
+            timeout_seconds=30,
+            operation="seed runtime options",
+        )
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.run_docker"
+    )
+    def test_seed_runtime_options_rejects_invalid_volume_name(
+        self,
+        docker_runner,
+    ):
+        image = runtime_docker.WrapperImageInspection(
+            image_id="sha256:" + ("a" * 64),
+            tag=(
+                "wealthfolio-runtime-test:"
+                "3.6.3-4-amd64"
+            ),
+            os="linux",
+            architecture="amd64",
+            command=("/run.sh",),
+            hass_version="3.6.3-4",
+            hass_arch="amd64",
+            hass_type="app",
+        )
+
+        volume = runtime_docker.RuntimeDataVolume(
+            name="bad volume name",
+        )
+
+        with self.assertRaisesRegex(
+            DockerRuntimeError,
+            r"runtime data volume name is invalid",
+        ):
+            runtime_docker.seed_runtime_options(
+                volume=volume,
+                image=image,
+                options_bytes=b"{}\n",
+            )
+
+        docker_runner.assert_not_called()
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.run_docker"
+    )
+    def test_seed_runtime_options_rejects_unvalidated_image(
+        self,
+        docker_runner,
+    ):
+        volume = runtime_docker.RuntimeDataVolume(
+            name="runtime-data-123",
+        )
+
+        invalid_image = runtime_docker.WrapperImageInspection(
+            image_id="sha256:not-valid",
+            tag=(
+                "wealthfolio-runtime-test:"
+                "3.6.3-4-amd64"
+            ),
+            os="linux",
+            architecture="amd64",
+            command=("/run.sh",),
+            hass_version="3.6.3-4",
+            hass_arch="amd64",
+            hass_type="app",
+        )
+
+        with self.assertRaisesRegex(
+            DockerRuntimeError,
+            r"runtime image inspection is invalid",
+        ):
+            runtime_docker.seed_runtime_options(
+                volume=volume,
+                image=invalid_image,
+                options_bytes=b"{}\n",
+            )
+
+        docker_runner.assert_not_called()
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.run_docker"
+    )
+    def test_seed_runtime_options_requires_bytes(
+        self,
+        docker_runner,
+    ):
+        volume = runtime_docker.RuntimeDataVolume(
+            name="runtime-data-123",
+        )
+
+        image = runtime_docker.WrapperImageInspection(
+            image_id="sha256:" + ("a" * 64),
+            tag=(
+                "wealthfolio-runtime-test:"
+                "3.6.3-4-amd64"
+            ),
+            os="linux",
+            architecture="amd64",
+            command=("/run.sh",),
+            hass_version="3.6.3-4",
+            hass_arch="amd64",
+            hass_type="app",
+        )
+
+        with self.assertRaises(TypeError):
+            runtime_docker.seed_runtime_options(
+                volume=volume,
+                image=image,
+                options_bytes="{}",
+            )
+
+        docker_runner.assert_not_called()
+
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.run_docker"
+    )
+    def test_seed_runtime_options_rejects_wrong_volume_type(
+        self,
+        docker_runner,
+    ):
+        image = runtime_docker.WrapperImageInspection(
+            image_id="sha256:" + ("a" * 64),
+            tag=(
+                "wealthfolio-runtime-test:"
+                "3.6.3-4-amd64"
+            ),
+            os="linux",
+            architecture="amd64",
+            command=("/run.sh",),
+            hass_version="3.6.3-4",
+            hass_arch="amd64",
+            hass_type="app",
+        )
+
+        with self.assertRaisesRegex(
+            TypeError,
+            r"^volume must be a RuntimeDataVolume$",
+        ):
+            runtime_docker.seed_runtime_options(
+                volume="runtime-data-123",
+                image=image,
+                options_bytes=b"{}\n",
+            )
+
+        docker_runner.assert_not_called()
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.run_docker"
+    )
+    def test_seed_runtime_options_rejects_wrong_image_type(
+        self,
+        docker_runner,
+    ):
+        volume = runtime_docker.RuntimeDataVolume(
+            name="runtime-data-123",
+        )
+
+        with self.assertRaisesRegex(
+            TypeError,
+            r"^image must be a WrapperImageInspection$",
+        ):
+            runtime_docker.seed_runtime_options(
+                volume=volume,
+                image="sha256:" + ("a" * 64),
+                options_bytes=b"{}\n",
+            )
+
+        docker_runner.assert_not_called()
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.run_docker"
+    )
+    def test_seed_runtime_options_rejects_non_string_image_id(
+        self,
+        docker_runner,
+    ):
+        volume = runtime_docker.RuntimeDataVolume(
+            name="runtime-data-123",
+        )
+
+        image = runtime_docker.WrapperImageInspection(
+            image_id=None,
+            tag=(
+                "wealthfolio-runtime-test:"
+                "3.6.3-4-amd64"
+            ),
+            os="linux",
+            architecture="amd64",
+            command=("/run.sh",),
+            hass_version="3.6.3-4",
+            hass_arch="amd64",
+            hass_type="app",
+        )
+
+        with self.assertRaisesRegex(
+            DockerRuntimeError,
+            r"^runtime image inspection is invalid$",
+        ):
+            runtime_docker.seed_runtime_options(
+                volume=volume,
+                image=image,
+                options_bytes=b"{}\n",
+            )
+
+        docker_runner.assert_not_called()
+
+
+class RuntimeContainerStartTests(unittest.TestCase):
+    def test_runtime_test_options_are_canonical(self):
+        expected = (
+            b'{"auth_password_hash":'
+            b'"$argon2id$v=19$m=19456,t=2,p=1$'
+            b'd2VhbHRoZm9saW8tdGVzdCE$'
+            b'OkbKuJHEwf5aVPMa6jo/umIqdm2MDXwBK4DVTDXFFOw",'
+            b'"cors_allow_origins":"http://127.0.0.1",'
+            b'"auth_token_ttl_minutes":480}\n'
+        )
+
+        result = runtime_docker.runtime_test_options_bytes()
+
+        self.assertEqual(result, expected)
+
+        decoded = json.loads(result)
+
+        self.assertEqual(
+            decoded["cors_allow_origins"],
+            "http://127.0.0.1",
+        )
+        self.assertNotIn(
+            "*",
+            decoded["cors_allow_origins"],
+        )
+        self.assertEqual(
+            decoded["auth_token_ttl_minutes"],
+            480,
+        )
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.run_docker"
+    )
+    def test_start_runtime_container_uses_real_wrapper_cmd(
+        self,
+        docker_runner,
+    ):
+        container_id = "b" * 64
+        docker_runner.return_value = (
+            container_id.encode("ascii") + b"\n"
+        )
+
+        volume = runtime_docker.RuntimeDataVolume(
+            name="runtime-data-123",
+        )
+
+        image_id = "sha256:" + ("a" * 64)
+
+        image = runtime_docker.WrapperImageInspection(
+            image_id=image_id,
+            tag=(
+                "wealthfolio-runtime-test:"
+                "3.6.3-4-amd64"
+            ),
+            os="linux",
+            architecture="amd64",
+            command=("/run.sh",),
+            hass_version="3.6.3-4",
+            hass_arch="amd64",
+            hass_type="app",
+        )
+
+        result = runtime_docker.start_runtime_container(
+            volume=volume,
+            image=image,
+        )
+
+        self.assertEqual(
+            result.container_id,
+            container_id,
+        )
+
+        docker_runner.assert_called_once_with(
+            [
+                "run",
+                "--detach",
+                "--init",
+                "--network",
+                "none",
+                "--label",
+                "io.wealthfolio.runtime-test=true",
+                "--label",
+                "io.wealthfolio.runtime-test.role=runtime",
+                "--mount",
+                (
+                    "type=volume,"
+                    "source=runtime-data-123,"
+                    "destination=/data"
+                ),
+                "--env",
+                "WF_LISTEN_ADDR=0.0.0.0:8088",
+                "--env",
+                (
+                    "WF_DB_PATH="
+                    "/data/wealthfolio/wealthfolio.db"
+                ),
+                "--env",
+                "WF_AUTH_REQUIRED=true",
+                "--env",
+                "WF_MCP_ENABLED=false",
+                image_id,
+            ],
+            timeout_seconds=30,
+            operation="start runtime container",
+        )
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.run_docker"
+    )
+    def test_start_runtime_container_rejects_invalid_id(
+        self,
+        docker_runner,
+    ):
+        invalid_outputs = (
+            b"",
+            b"\n",
+            b"short\n",
+            (b"A" * 64) + b"\n",
+            b"one\ntwo\n",
+            b"\xff\n",
+        )
+
+        volume = runtime_docker.RuntimeDataVolume(
+            name="runtime-data-123",
+        )
+
+        image = runtime_docker.WrapperImageInspection(
+            image_id="sha256:" + ("a" * 64),
+            tag=(
+                "wealthfolio-runtime-test:"
+                "3.6.3-4-amd64"
+            ),
+            os="linux",
+            architecture="amd64",
+            command=("/run.sh",),
+            hass_version="3.6.3-4",
+            hass_arch="amd64",
+            hass_type="app",
+        )
+
+        for output in invalid_outputs:
+            with self.subTest(output=output):
+                docker_runner.reset_mock()
+                docker_runner.return_value = output
+
+                with self.assertRaisesRegex(
+                    DockerRuntimeError,
+                    r"^runtime container ID is invalid$",
+                ):
+                    runtime_docker.start_runtime_container(
+                        volume=volume,
+                        image=image,
+                    )
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.run_docker"
+    )
+    def test_start_runtime_container_rejects_invalid_volume(
+        self,
+        docker_runner,
+    ):
+        volume = runtime_docker.RuntimeDataVolume(
+            name="bad volume name",
+        )
+
+        image = runtime_docker.WrapperImageInspection(
+            image_id="sha256:" + ("a" * 64),
+            tag=(
+                "wealthfolio-runtime-test:"
+                "3.6.3-4-amd64"
+            ),
+            os="linux",
+            architecture="amd64",
+            command=("/run.sh",),
+            hass_version="3.6.3-4",
+            hass_arch="amd64",
+            hass_type="app",
+        )
+
+        with self.assertRaisesRegex(
+            DockerRuntimeError,
+            r"^runtime data volume name is invalid$",
+        ):
+            runtime_docker.start_runtime_container(
+                volume=volume,
+                image=image,
+            )
+
+        docker_runner.assert_not_called()
+
+
+class RuntimeHttpHealthTests(unittest.TestCase):
+    def test_health_request_is_canonical(self):
+        self.assertEqual(
+            runtime_docker.runtime_health_request_bytes(),
+            (
+                b"GET /api/v1/healthz HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Connection: close\r\n"
+                b"\r\n"
+            ),
+        )
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.run_docker"
+    )
+    def test_http_exchange_uses_internal_nc(
+        self,
+        docker_runner,
+    ):
+        response = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Length: 2\r\n"
+            b"\r\n"
+            b"ok"
+        )
+
+        docker_runner.return_value = response
+
+        container = runtime_docker.RuntimeContainer(
+            container_id="b" * 64,
+        )
+
+        request = (
+            b"GET /api/v1/healthz HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\n"
+            b"Connection: close\r\n"
+            b"\r\n"
+        )
+
+        result = runtime_docker.runtime_http_exchange(
+            container=container,
+            request_bytes=request,
+        )
+
+        self.assertEqual(result, response)
+
+        docker_runner.assert_called_once_with(
+            [
+                "exec",
+                "--interactive",
+                "b" * 64,
+                "nc",
+                "-w",
+                "2",
+                "127.0.0.1",
+                "8088",
+            ],
+            input_bytes=request,
+            timeout_seconds=5,
+            operation="probe runtime HTTP",
+        )
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.run_docker"
+    )
+    def test_http_exchange_rejects_invalid_container_id(
+        self,
+        docker_runner,
+    ):
+        container = runtime_docker.RuntimeContainer(
+            container_id="not-a-container-id",
+        )
+
+        with self.assertRaisesRegex(
+            DockerRuntimeError,
+            r"^runtime container ID is invalid$",
+        ):
+            runtime_docker.runtime_http_exchange(
+                container=container,
+                request_bytes=b"GET / HTTP/1.1\r\n\r\n",
+            )
+
+        docker_runner.assert_not_called()
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.run_docker"
+    )
+    def test_http_exchange_requires_bytes(
+        self,
+        docker_runner,
+    ):
+        container = runtime_docker.RuntimeContainer(
+            container_id="b" * 64,
+        )
+
+        with self.assertRaisesRegex(
+            TypeError,
+            r"^request_bytes must be bytes$",
+        ):
+            runtime_docker.runtime_http_exchange(
+                container=container,
+                request_bytes="GET /",
+            )
+
+        docker_runner.assert_not_called()
+
+    def test_health_response_requires_200_and_exact_ok_body(self):
+        cases = (
+            (
+                (
+                    b"HTTP/1.1 200 OK\r\n"
+                    b"Content-Length: 2\r\n"
+                    b"\r\n"
+                    b"ok"
+                ),
+                True,
+            ),
+            (
+                (
+                    b"HTTP/1.1 503 Service Unavailable\r\n"
+                    b"Content-Length: 2\r\n"
+                    b"\r\n"
+                    b"ok"
+                ),
+                False,
+            ),
+            (
+                (
+                    b"HTTP/1.1 200 OK\r\n"
+                    b"Content-Length: 3\r\n"
+                    b"\r\n"
+                    b"bad"
+                ),
+                False,
+            ),
+            (
+                b"not-http",
+                False,
+            ),
+            (
+                b"",
+                False,
+            ),
+        )
+
+        for response, expected in cases:
+            with self.subTest(response=response):
+                self.assertEqual(
+                    runtime_docker
+                    .runtime_health_response_is_ready(
+                        response
+                    ),
+                    expected,
+                )
+
+
+class RuntimeReadinessTests(unittest.TestCase):
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.run_docker"
+    )
+    def test_inspect_runtime_container_state(
+        self,
+        docker_runner,
+    ):
+        docker_runner.return_value = (
+            b'{"Status":"running",'
+            b'"Running":true,'
+            b'"ExitCode":0}\n'
+        )
+
+        container = runtime_docker.RuntimeContainer(
+            container_id="b" * 64,
+        )
+
+        result = (
+            runtime_docker.inspect_runtime_container_state(
+                container=container,
+            )
+        )
+
+        self.assertEqual(result.status, "running")
+        self.assertIs(result.running, True)
+        self.assertEqual(result.exit_code, 0)
+
+        docker_runner.assert_called_once_with(
+            [
+                "inspect",
+                "b" * 64,
+                "--format",
+                "{{json .State}}",
+            ],
+            timeout_seconds=30,
+            operation="inspect runtime container state",
+        )
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.run_docker"
+    )
+    def test_inspect_runtime_container_state_rejects_invalid_shape(
+        self,
+        docker_runner,
+    ):
+        invalid_outputs = (
+            b"not-json",
+            b"[]",
+            b"{}",
+            (
+                b'{"Status":"",'
+                b'"Running":true,'
+                b'"ExitCode":0}'
+            ),
+            (
+                b'{"Status":"running",'
+                b'"Running":"true",'
+                b'"ExitCode":0}'
+            ),
+            (
+                b'{"Status":"running",'
+                b'"Running":true,'
+                b'"ExitCode":false}'
+            ),
+        )
+
+        container = runtime_docker.RuntimeContainer(
+            container_id="b" * 64,
+        )
+
+        for output in invalid_outputs:
+            with self.subTest(output=output):
+                docker_runner.reset_mock()
+                docker_runner.return_value = output
+
+                with self.assertRaises(
+                    DockerRuntimeError
+                ):
+                    runtime_docker.inspect_runtime_container_state(
+                        container=container,
+                    )
+
+    @patch("time.sleep")
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_http_exchange"
+    )
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.inspect_runtime_container_state"
+    )
+    def test_wait_runtime_ready_retries_then_returns_health(
+        self,
+        inspect_state,
+        http_exchange,
+        sleep,
+    ):
+        running = runtime_docker.RuntimeContainerState(
+            status="running",
+            running=True,
+            exit_code=0,
+        )
+
+        inspect_state.side_effect = (
+            running,
+            running,
+        )
+
+        ready = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Length: 2\r\n"
+            b"\r\n"
+            b"ok"
+        )
+
+        http_exchange.side_effect = (
+            DockerRuntimeError(
+                "Docker probe runtime HTTP failed "
+                "with exit code 1"
+            ),
+            ready,
+        )
+
+        container = runtime_docker.RuntimeContainer(
+            container_id="b" * 64,
+        )
+
+        result = runtime_docker.wait_runtime_ready(
+            container=container,
+            max_attempts=3,
+            delay_seconds=0.25,
+        )
+
+        self.assertEqual(result, ready)
+
+        self.assertEqual(
+            inspect_state.call_count,
+            2,
+        )
+        self.assertEqual(
+            http_exchange.call_count,
+            2,
+        )
+        sleep.assert_called_once_with(0.25)
+
+    @patch("time.sleep")
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_http_exchange"
+    )
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.inspect_runtime_container_state"
+    )
+    def test_wait_runtime_ready_fails_if_container_stops(
+        self,
+        inspect_state,
+        http_exchange,
+        sleep,
+    ):
+        inspect_state.return_value = (
+            runtime_docker.RuntimeContainerState(
+                status="exited",
+                running=False,
+                exit_code=1,
+            )
+        )
+
+        container = runtime_docker.RuntimeContainer(
+            container_id="b" * 64,
+        )
+
+        with self.assertRaisesRegex(
+            DockerRuntimeError,
+            r"runtime container stopped before becoming healthy",
+        ):
+            runtime_docker.wait_runtime_ready(
+                container=container,
+                max_attempts=3,
+                delay_seconds=0.25,
+            )
+
+        http_exchange.assert_not_called()
+        sleep.assert_not_called()
+
+    @patch("time.sleep")
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_http_exchange"
+    )
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.inspect_runtime_container_state"
+    )
+    def test_wait_runtime_ready_fails_after_attempt_limit(
+        self,
+        inspect_state,
+        http_exchange,
+        sleep,
+    ):
+        inspect_state.return_value = (
+            runtime_docker.RuntimeContainerState(
+                status="running",
+                running=True,
+                exit_code=0,
+            )
+        )
+
+        http_exchange.return_value = (
+            b"HTTP/1.1 503 Service Unavailable\r\n"
+            b"Content-Length: 2\r\n"
+            b"\r\n"
+            b"ok"
+        )
+
+        container = runtime_docker.RuntimeContainer(
+            container_id="b" * 64,
+        )
+
+        with self.assertRaisesRegex(
+            DockerRuntimeError,
+            r"^runtime container did not become healthy$",
+        ):
+            runtime_docker.wait_runtime_ready(
+                container=container,
+                max_attempts=2,
+                delay_seconds=0.25,
+            )
+
+        self.assertEqual(
+            inspect_state.call_count,
+            2,
+        )
+        self.assertEqual(
+            http_exchange.call_count,
+            2,
+        )
+        sleep.assert_called_once_with(0.25)
+
+
+class RuntimeBootstrapInspectionTests(unittest.TestCase):
+    @staticmethod
+    def valid_bootstrap_output() -> bytes:
+        return (
+            b"secret_uid=0\n"
+            b"secret_gid=0\n"
+            b"secret_mode=600\n"
+            b"secret_size=45\n"
+            b"secret_decoded_bytes=32\n"
+            b"data_uid=1000\n"
+            b"data_gid=1000\n"
+            b"data_mode=755\n"
+            b"db_uid=1000\n"
+            b"db_gid=1000\n"
+            b"db_mode=644\n"
+            b"db_size=1155072\n"
+            b"options_uid=0\n"
+            b"options_gid=0\n"
+            b"options_mode=600\n"
+            b"options_size=193\n"
+        )
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.run_docker"
+    )
+    def test_inspect_runtime_bootstrap_returns_state(
+        self,
+        docker_runner,
+    ):
+        docker_runner.return_value = (
+            self.valid_bootstrap_output()
+        )
+
+        container = runtime_docker.RuntimeContainer(
+            container_id="b" * 64,
+        )
+
+        result = runtime_docker.inspect_runtime_bootstrap(
+            container=container,
+        )
+
+        self.assertEqual(result.secret_uid, 0)
+        self.assertEqual(result.secret_gid, 0)
+        self.assertEqual(result.secret_mode, "600")
+        self.assertEqual(result.secret_size, 45)
+        self.assertEqual(
+            result.secret_decoded_bytes,
+            32,
+        )
+
+        self.assertEqual(result.data_uid, 1000)
+        self.assertEqual(result.data_gid, 1000)
+        self.assertEqual(result.data_mode, "755")
+
+        self.assertEqual(result.db_uid, 1000)
+        self.assertEqual(result.db_gid, 1000)
+        self.assertEqual(result.db_mode, "644")
+        self.assertEqual(result.db_size, 1155072)
+
+        self.assertEqual(result.options_uid, 0)
+        self.assertEqual(result.options_gid, 0)
+        self.assertEqual(result.options_mode, "600")
+        self.assertEqual(result.options_size, 193)
+
+        docker_runner.assert_called_once()
+
+        arguments = docker_runner.call_args.args[0]
+
+        self.assertEqual(
+            arguments[:4],
+            [
+                "exec",
+                "b" * 64,
+                "/bin/sh",
+                "-c",
+            ],
+        )
+
+        script = arguments[4]
+
+        self.assertIn(
+            "SECRET=/data/.wf_secret_key",
+            script,
+        )
+        self.assertIn(
+            "DB=/data/wealthfolio/wealthfolio.db",
+            script,
+        )
+        self.assertIn(
+            "OPTIONS=/data/options.json",
+            script,
+        )
+        self.assertNotIn(
+            'printf \'%s\' "$key"',
+            script.split(
+                "openssl base64",
+                1,
+            )[-1],
+        )
+
+        self.assertEqual(
+            docker_runner.call_args.kwargs,
+            {
+                "timeout_seconds": 30,
+                "operation": (
+                    "inspect runtime bootstrap"
+                ),
+            },
+        )
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.run_docker"
+    )
+    def test_inspect_runtime_bootstrap_rejects_invalid_output(
+        self,
+        docker_runner,
+    ):
+        invalid_outputs = (
+            b"",
+            b"not-key-value\n",
+            (
+                self.valid_bootstrap_output()
+                + b"unexpected=1\n"
+            ),
+            self.valid_bootstrap_output().replace(
+                b"db_size=1155072\n",
+                b"",
+            ),
+            self.valid_bootstrap_output().replace(
+                b"db_size=1155072\n",
+                b"db_size=abc\n",
+            ),
+            self.valid_bootstrap_output().replace(
+                b"data_mode=755\n",
+                b"data_mode=999\n",
+            ),
+            self.valid_bootstrap_output().replace(
+                b"db_size=1155072\n",
+                (
+                    b"db_size=1155072\n"
+                    b"db_size=1155072\n"
+                ),
+            ),
+        )
+
+        container = runtime_docker.RuntimeContainer(
+            container_id="b" * 64,
+        )
+
+        for output in invalid_outputs:
+            with self.subTest(output=output):
+                docker_runner.reset_mock()
+                docker_runner.return_value = output
+
+                with self.assertRaisesRegex(
+                    DockerRuntimeError,
+                    r"^runtime bootstrap inspection is invalid$",
+                ):
+                    runtime_docker.inspect_runtime_bootstrap(
+                        container=container,
+                    )
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.run_docker"
+    )
+    def test_inspect_runtime_bootstrap_rejects_contract_mismatch(
+        self,
+        docker_runner,
+    ):
+        replacements = (
+            (
+                b"secret_uid=0\n",
+                b"secret_uid=1000\n",
+            ),
+            (
+                b"secret_gid=0\n",
+                b"secret_gid=1000\n",
+            ),
+            (
+                b"secret_mode=600\n",
+                b"secret_mode=644\n",
+            ),
+            (
+                b"secret_decoded_bytes=32\n",
+                b"secret_decoded_bytes=16\n",
+            ),
+            (
+                b"data_uid=1000\n",
+                b"data_uid=0\n",
+            ),
+            (
+                b"data_gid=1000\n",
+                b"data_gid=0\n",
+            ),
+            (
+                b"db_uid=1000\n",
+                b"db_uid=0\n",
+            ),
+            (
+                b"db_gid=1000\n",
+                b"db_gid=0\n",
+            ),
+            (
+                b"db_size=1155072\n",
+                b"db_size=0\n",
+            ),
+            (
+                b"options_uid=0\n",
+                b"options_uid=1000\n",
+            ),
+            (
+                b"options_gid=0\n",
+                b"options_gid=1000\n",
+            ),
+            (
+                b"options_mode=600\n",
+                b"options_mode=644\n",
+            ),
+        )
+
+        container = runtime_docker.RuntimeContainer(
+            container_id="b" * 64,
+        )
+
+        base = self.valid_bootstrap_output()
+
+        for old, new in replacements:
+            with self.subTest(old=old, new=new):
+                docker_runner.reset_mock()
+                docker_runner.return_value = (
+                    base.replace(old, new)
+                )
+
+                with self.assertRaisesRegex(
+                    DockerRuntimeError,
+                    r"^runtime bootstrap contract mismatch$",
+                ):
+                    runtime_docker.inspect_runtime_bootstrap(
+                        container=container,
+                    )
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.run_docker"
+    )
+    def test_inspect_runtime_bootstrap_rejects_invalid_container(
+        self,
+        docker_runner,
+    ):
+        container = runtime_docker.RuntimeContainer(
+            container_id="invalid",
+        )
+
+        with self.assertRaisesRegex(
+            DockerRuntimeError,
+            r"^runtime container ID is invalid$",
+        ):
+            runtime_docker.inspect_runtime_bootstrap(
+                container=container,
+            )
+
+        docker_runner.assert_not_called()
+
+
+class RuntimeCleanupTests(unittest.TestCase):
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.run_docker"
+    )
+    def test_cleanup_runtime_container_verifies_ownership_then_removes(
+        self,
+        docker_runner,
+    ):
+        docker_runner.side_effect = (
+            (
+                b'{"io.wealthfolio.runtime-test":"true",'
+                b'"io.wealthfolio.runtime-test.role":"runtime"}\n'
+            ),
+            b"runtime-container-id\n",
+        )
+
+        container = runtime_docker.RuntimeContainer(
+            container_id="b" * 64,
+        )
+
+        runtime_docker.cleanup_runtime_container(
+            container=container,
+        )
+
+        self.assertEqual(
+            docker_runner.call_count,
+            2,
+        )
+
+        self.assertEqual(
+            docker_runner.call_args_list[0].args[0],
+            [
+                "inspect",
+                "b" * 64,
+                "--format",
+                "{{json .Config.Labels}}",
+            ],
+        )
+
+        self.assertEqual(
+            docker_runner.call_args_list[0].kwargs,
+            {
+                "timeout_seconds": 30,
+                "operation": (
+                    "inspect runtime container ownership"
+                ),
+            },
+        )
+
+        self.assertEqual(
+            docker_runner.call_args_list[1].args[0],
+            [
+                "rm",
+                "--force",
+                "--volumes",
+                "b" * 64,
+            ],
+        )
+
+        self.assertEqual(
+            docker_runner.call_args_list[1].kwargs,
+            {
+                "timeout_seconds": 30,
+                "operation": (
+                    "remove runtime container"
+                ),
+            },
+        )
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.run_docker"
+    )
+    def test_cleanup_runtime_container_rejects_foreign_object(
+        self,
+        docker_runner,
+    ):
+        invalid_labels = (
+            b"null\n",
+            b"{}\n",
+            (
+                b'{"io.wealthfolio.runtime-test":"false",'
+                b'"io.wealthfolio.runtime-test.role":"runtime"}\n'
+            ),
+            (
+                b'{"io.wealthfolio.runtime-test":"true",'
+                b'"io.wealthfolio.runtime-test.role":"data"}\n'
+            ),
+        )
+
+        container = runtime_docker.RuntimeContainer(
+            container_id="b" * 64,
+        )
+
+        for output in invalid_labels:
+            with self.subTest(output=output):
+                docker_runner.reset_mock()
+                docker_runner.side_effect = None
+                docker_runner.return_value = output
+
+                with self.assertRaisesRegex(
+                    DockerRuntimeError,
+                    r"^runtime container ownership mismatch$",
+                ):
+                    runtime_docker.cleanup_runtime_container(
+                        container=container,
+                    )
+
+                docker_runner.assert_called_once()
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.run_docker"
+    )
+    def test_cleanup_runtime_data_volume_verifies_ownership_then_removes(
+        self,
+        docker_runner,
+    ):
+        docker_runner.side_effect = (
+            (
+                b'{"io.wealthfolio.runtime-test":"true",'
+                b'"io.wealthfolio.runtime-test.role":"data"}\n'
+            ),
+            b"runtime-data-123\n",
+        )
+
+        volume = runtime_docker.RuntimeDataVolume(
+            name="runtime-data-123",
+        )
+
+        runtime_docker.cleanup_runtime_data_volume(
+            volume=volume,
+        )
+
+        self.assertEqual(
+            docker_runner.call_count,
+            2,
+        )
+
+        self.assertEqual(
+            docker_runner.call_args_list[0].args[0],
+            [
+                "volume",
+                "inspect",
+                "runtime-data-123",
+                "--format",
+                "{{json .Labels}}",
+            ],
+        )
+
+        self.assertEqual(
+            docker_runner.call_args_list[0].kwargs,
+            {
+                "timeout_seconds": 30,
+                "operation": (
+                    "inspect runtime data volume ownership"
+                ),
+            },
+        )
+
+        self.assertEqual(
+            docker_runner.call_args_list[1].args[0],
+            [
+                "volume",
+                "rm",
+                "runtime-data-123",
+            ],
+        )
+
+        self.assertEqual(
+            docker_runner.call_args_list[1].kwargs,
+            {
+                "timeout_seconds": 30,
+                "operation": (
+                    "remove runtime data volume"
+                ),
+            },
+        )
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.run_docker"
+    )
+    def test_cleanup_runtime_data_volume_rejects_foreign_object(
+        self,
+        docker_runner,
+    ):
+        invalid_labels = (
+            b"null\n",
+            b"{}\n",
+            (
+                b'{"io.wealthfolio.runtime-test":"false",'
+                b'"io.wealthfolio.runtime-test.role":"data"}\n'
+            ),
+            (
+                b'{"io.wealthfolio.runtime-test":"true",'
+                b'"io.wealthfolio.runtime-test.role":"runtime"}\n'
+            ),
+        )
+
+        volume = runtime_docker.RuntimeDataVolume(
+            name="runtime-data-123",
+        )
+
+        for output in invalid_labels:
+            with self.subTest(output=output):
+                docker_runner.reset_mock()
+                docker_runner.side_effect = None
+                docker_runner.return_value = output
+
+                with self.assertRaisesRegex(
+                    DockerRuntimeError,
+                    r"^runtime data volume ownership mismatch$",
+                ):
+                    runtime_docker.cleanup_runtime_data_volume(
+                        volume=volume,
+                    )
+
+                docker_runner.assert_called_once()
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.run_docker"
+    )
+    def test_cleanup_rejects_invalid_ownership_json(
+        self,
+        docker_runner,
+    ):
+        container = runtime_docker.RuntimeContainer(
+            container_id="b" * 64,
+        )
+
+        invalid_outputs = (
+            b"",
+            b"not-json",
+            b"[]",
+            b"\xff",
+        )
+
+        for output in invalid_outputs:
+            with self.subTest(output=output):
+                docker_runner.reset_mock()
+                docker_runner.return_value = output
+
+                with self.assertRaisesRegex(
+                    DockerRuntimeError,
+                    r"^runtime ownership inspection is invalid$",
+                ):
+                    runtime_docker.cleanup_runtime_container(
+                        container=container,
+                    )
+
+                docker_runner.assert_called_once()
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.run_docker"
+    )
+    def test_cleanup_rejects_invalid_identifiers_before_docker(
+        self,
+        docker_runner,
+    ):
+        with self.assertRaisesRegex(
+            DockerRuntimeError,
+            r"^runtime container ID is invalid$",
+        ):
+            runtime_docker.cleanup_runtime_container(
+                container=runtime_docker.RuntimeContainer(
+                    container_id="foreign",
+                ),
+            )
+
+        with self.assertRaisesRegex(
+            DockerRuntimeError,
+            r"^runtime data volume name is invalid$",
+        ):
+            runtime_docker.cleanup_runtime_data_volume(
+                volume=runtime_docker.RuntimeDataVolume(
+                    name="bad volume name",
+                ),
+            )
+
+        docker_runner.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

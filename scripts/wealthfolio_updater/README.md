@@ -11,7 +11,8 @@ not install updates into Home Assistant automatically.
 
 The implementation in this directory currently covers the policy,
 repository-integrity, read-only upstream-discovery, audit-only
-orchestration and initial native-amd64 runtime-build layers.
+orchestration, native-amd64 runtime-build and fresh runtime/bootstrap
+layers.
 
 Implemented:
 
@@ -50,6 +51,18 @@ Implemented:
   `LOCAL_BUILD` repository state;
 - fail-closed inspection of built wrapper image identity, OS/architecture,
   `/run.sh` command and Home Assistant image labels;
+- controlled named-volume creation and deterministic runtime-option seeding
+  through standard input;
+- isolated native-amd64 runtime startup with `--network none`, an explicit
+  `/data` named-volume mount and the wrapper image's default `/run.sh`
+  command;
+- bounded container-state and readiness polling with in-container HTTP
+  probing over loopback;
+- fail-closed inspection of bootstrap filesystem ownership,
+  selected security-sensitive modes, non-empty SQLite state and master-key
+  decoding without exposing the master key;
+- ownership-verified cleanup of runtime containers and data volumes, with
+  deletion denied when the required harness labels are absent or wrong;
 - offline unit tests for all implemented behavior.
 
 The read-only network path has also been smoke-tested against the real
@@ -58,7 +71,6 @@ the offline unit-test suite.
 
 Not implemented yet:
 
-- fresh container runtime/bootstrap validation;
 - authenticated functional-runtime workload tests;
 - restart/persistence validation;
 - OLD -> NEW migration tests;
@@ -125,8 +137,9 @@ wealthfolio_updater/
 │   adding update or publication behavior.
 │
 ├── runtime_docker.py
-│   Shell-free Docker execution boundary plus controlled native-amd64
-│   wrapper build and fail-closed built-image contract inspection.
+│   Shell-free Docker execution boundary, controlled native-amd64 wrapper
+│   build and image inspection, plus isolated fresh-runtime/bootstrap
+│   creation, readiness, inspection and ownership-guarded cleanup.
 │
 ├── updater.py
 │   Stable public facade re-exporting the supported package API.
@@ -471,10 +484,10 @@ DECIDE / PUBLISH
 A PLAN candidate is not equivalent to a publishable or validated
 candidate.
 
-The native-amd64 wrapper build and built-image inspection foundation is
-now implemented. Fresh-runtime, functional-workload, persistence,
-migration, AppArmor, exact-artifact and publication gates remain in later
-work units.
+The native-amd64 wrapper build, built-image inspection and fresh
+runtime/bootstrap foundation are now implemented. Authenticated functional
+workload, persistence, migration, AppArmor, exact-artifact and publication
+gates remain in later work units.
 
 ## Stale-base protection
 
@@ -502,12 +515,17 @@ python3 -m unittest discover \
   -v
 ```
 
-The current development baseline contains 223 offline unit tests.
+The current development baseline contains 256 offline unit tests.
 
-Nineteen of those tests cover the WU-4A Docker boundary, controlled
-native-amd64 build construction and built-image inspection. They mock the
-Docker subprocess boundary and therefore keep the complete unit-test suite
-offline and independent of a Docker daemon.
+Nineteen tests cover the WU-4A Docker boundary, controlled native-amd64
+build construction and built-image inspection.
+
+WU-4B adds 33 tests covering controlled runtime-volume creation, option
+seeding, default-command startup, runtime state and readiness, bootstrap
+artifact inspection and ownership-guarded cleanup.
+
+Those tests mock the Docker subprocess boundary and therefore keep the
+complete unit-test suite offline and independent of a Docker daemon.
 
 For structural changes, also verify module compilation and importability:
 
@@ -589,10 +607,37 @@ reproducible publication identity and does not establish that a future
 published artifact is byte-identical to the tested image. Exact
 tested-artifact preservation remains a later work unit.
 
-No container or persistent volume was created by this WU-4A smoke. It
-therefore does not yet demonstrate application startup, Home Assistant
-bootstrap, authentication, SQLite behavior, functional API behavior,
-persistence or migration compatibility.
+The WU-4A build-only smoke did not create a runtime container or
+persistent volume. WU-4B has now separately exercised that same local image
+through the fresh runtime/bootstrap path.
+
+The WU-4B local Docker smoke verified:
+
+- creation of a harness-owned Docker volume explicitly mounted at
+  `/data`;
+- deterministic Home Assistant runtime options seeded through standard
+  input;
+- startup through the image's default `/run.sh` command with
+  `--network none` and no published host ports;
+- runtime readiness through an in-container loopback HTTP probe, returning
+  `HTTP/1.1 200 OK` from `/api/v1/healthz`;
+- a running container state with exit code zero after readiness;
+- a root-owned master-key file with mode `0600` whose Base64 content
+  decodes to exactly 32 bytes, without printing the key;
+- a `1000:1000` Wealthfolio data directory and non-empty SQLite database;
+- a root-owned runtime-options file with mode `0600`;
+- ownership-verified cleanup that returned Docker to zero test containers
+  and zero test volumes;
+- fail-closed cleanup against a real unlabeled foreign volume: deletion was
+  rejected and the volume remained present until manually removed.
+
+The observed data-directory and SQLite modes are treated as smoke evidence,
+not as fixed compatibility invariants by the harness.
+
+WU-4B establishes fresh startup and bootstrap only. It does not yet
+demonstrate authenticated login, authenticated functional API behavior,
+restart persistence, OLD -> NEW migration compatibility, AppArmor
+compatibility or exact preservation of a future published artifact.
 
 WU-3 GitHub Actions orchestration has completed its first remote
 validation successfully. The run executed the then-current 200-test
@@ -607,14 +652,15 @@ orchestration are complete.
 WU-4 functional-runtime work is currently split as follows:
 
 A. native amd64 wrapper build + image inspection: complete
-B. fresh runtime/bootstrap: next
-C. authenticated functional workload: pending
+B. fresh runtime/bootstrap: complete
+C. authenticated functional workload: next
 D. restart/persistence: pending
 E. OLD -> NEW migration: pending
 F. GitHub Actions orchestration: pending
 
-WU-4A does not imply that Wealthfolio has yet been started or exercised by
-the runtime harness.
+WU-4B demonstrates isolated fresh startup and bootstrap of the native-amd64
+wrapper. It does not imply that authenticated functional behavior,
+restart/persistence, migration or AppArmor compatibility has passed.
 
 The remaining intended sequence is:
 
