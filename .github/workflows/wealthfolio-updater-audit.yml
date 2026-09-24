@@ -1,27 +1,30 @@
-name: Wealthfolio updater audit
+name: Wealthfolio updater
 
 on:
   push:
     branches:
-      - feat/wealthfolio-updater
+      - feat/wealthfolio-auto-update
+  schedule:
+    - cron: '37 */6 * * *'
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  audit:
-    name: Audit updater state
+  update:
+    name: Check and prepare Wealthfolio update
+    if: github.ref_type == 'branch'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     steps:
-      - name: Checkout audited commit
+      - name: Checkout updater base
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
-          persist-credentials: false
+          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
@@ -32,9 +35,50 @@ jobs:
       - name: Run offline updater tests
         run: python -m unittest discover -s scripts/wealthfolio_updater/tests -p 'test_*.py'
 
-      - name: Run read-only updater audit
+      - name: Apply audited upstream update
         run: |
-          python -m scripts.wealthfolio_updater.audit_cli \
+          python -m scripts.wealthfolio_updater.update_cli \
             --repository-root . \
-            --expected-git-sha '${{ github.sha }}' \
-            --markdown-output "$GITHUB_STEP_SUMMARY"
+            --expected-git-sha '${{ github.sha }}'
+
+      - name: Validate repository changes
+        id: changes
+        shell: bash
+        run: |
+          mapfile -t changed_files < <(git diff --name-only)
+
+          if [ "${#changed_files[@]}" -eq 0 ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "${#changed_files[@]}" -ne 2 ]; then
+            printf 'Unexpected number of changed files:\n' >&2
+            printf '  %s\n' "${changed_files[@]}" >&2
+            exit 1
+          fi
+
+          if [[ " ${changed_files[*]} " != *" tracker/Dockerfile "* ]]; then
+            printf 'tracker/Dockerfile was not changed\n' >&2
+            exit 1
+          fi
+
+          if [[ " ${changed_files[*]} " != *" tracker/config.yml "* ]]; then
+            printf 'tracker/config.yml was not changed\n' >&2
+            exit 1
+          fi
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push prepared update
+        if: steps.changes.outputs.changed == 'true'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -- tracker/Dockerfile tracker/config.yml
+
+          git commit -m "⬆️ chore(wealthfolio): update upstream release"
+
+          git push origin "HEAD:${{ github.ref_name }}"

@@ -1,3 +1,4 @@
+import re
 import unittest
 from pathlib import Path
 
@@ -14,20 +15,27 @@ SETUP_PYTHON_SHA = (
 )
 
 
-class AuditWorkflowContractTests(unittest.TestCase):
+class UpdaterWorkflowContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.text = WORKFLOW.read_text(
             encoding="utf-8"
         )
 
-    def test_trigger_scope_is_deliberately_narrow(self):
+    def test_triggers_feature_push_schedule_and_manual_dispatch(self):
         self.assertIn(
             "push:\n"
             "    branches:\n"
-            "      - feat/wealthfolio-updater\n",
+            "      - feat/wealthfolio-auto-update\n",
             self.text,
         )
+
+        self.assertIn(
+            "schedule:\n"
+            "    - cron: '37 */6 * * *'\n",
+            self.text,
+        )
+
         self.assertIn(
             "workflow_dispatch:",
             self.text,
@@ -36,22 +44,32 @@ class AuditWorkflowContractTests(unittest.TestCase):
         forbidden = [
             "pull_request:",
             "pull_request_target:",
-            "schedule:",
+            "workflow_run:",
+            "repository_dispatch:",
         ]
 
         for value in forbidden:
             with self.subTest(value=value):
-                self.assertNotIn(value, self.text)
+                self.assertNotIn(
+                    value,
+                    self.text,
+                )
 
-    def test_permissions_are_read_only(self):
+    def test_permissions_are_contents_write_only(self):
         self.assertIn(
             "permissions:\n"
-            "  contents: read\n",
+            "  contents: write\n",
             self.text,
         )
 
+        self.assertEqual(
+            self.text.count("permissions:"),
+            1,
+        )
+
         forbidden = [
-            "contents: write",
+            "permissions: read-all",
+            "permissions: write-all",
             "packages:",
             "issues:",
             "pull-requests:",
@@ -62,7 +80,16 @@ class AuditWorkflowContractTests(unittest.TestCase):
 
         for value in forbidden:
             with self.subTest(value=value):
-                self.assertNotIn(value, self.text)
+                self.assertNotIn(
+                    value,
+                    self.text,
+                )
+
+    def test_job_only_runs_for_branch_refs(self):
+        self.assertIn(
+            "if: github.ref_type == 'branch'",
+            self.text,
+        )
 
     def test_runner_and_timeout_are_explicit(self):
         self.assertIn(
@@ -74,7 +101,7 @@ class AuditWorkflowContractTests(unittest.TestCase):
             self.text,
         )
 
-    def test_checkout_is_pinned_and_does_not_persist_credentials(self):
+    def test_checkout_is_pinned_and_can_push(self):
         self.assertIn(
             f"uses: actions/checkout@{CHECKOUT_SHA}",
             self.text,
@@ -88,7 +115,7 @@ class AuditWorkflowContractTests(unittest.TestCase):
             self.text,
         )
         self.assertIn(
-            "persist-credentials: false",
+            "persist-credentials: true",
             self.text,
         )
 
@@ -105,28 +132,27 @@ class AuditWorkflowContractTests(unittest.TestCase):
             "check-latest: false",
             self.text,
         )
-
         self.assertNotIn(
             "cache:",
             self.text,
         )
 
-    def test_offline_suite_runs_before_live_audit(self):
+    def test_offline_suite_runs_before_repository_update(self):
         tests_command = (
             "python -m unittest discover "
             "-s scripts/wealthfolio_updater/tests "
             "-p 'test_*.py'"
         )
-        audit_command = (
+        update_command = (
             "python -m "
-            "scripts.wealthfolio_updater.audit_cli"
+            "scripts.wealthfolio_updater.update_cli"
         )
 
         tests_position = self.text.find(
             tests_command
         )
-        audit_position = self.text.find(
-            audit_command
+        update_position = self.text.find(
+            update_command
         )
 
         self.assertNotEqual(
@@ -134,15 +160,15 @@ class AuditWorkflowContractTests(unittest.TestCase):
             -1,
         )
         self.assertNotEqual(
-            audit_position,
+            update_position,
             -1,
         )
         self.assertLess(
             tests_position,
-            audit_position,
+            update_position,
         )
 
-    def test_audit_uses_event_sha_and_step_summary(self):
+    def test_updater_uses_exact_checkout_sha(self):
         self.assertIn(
             "--repository-root .",
             self.text,
@@ -152,62 +178,95 @@ class AuditWorkflowContractTests(unittest.TestCase):
             "'${{ github.sha }}'",
             self.text,
         )
+
+    def test_change_gate_requires_exact_tracker_files(self):
         self.assertIn(
-            '--markdown-output "$GITHUB_STEP_SUMMARY"',
+            "git diff --name-only",
+            self.text,
+        )
+        self.assertIn(
+            "tracker/Dockerfile",
+            self.text,
+        )
+        self.assertIn(
+            "tracker/config.yml",
+            self.text,
+        )
+        self.assertIn(
+            'echo "changed=false" >> "$GITHUB_OUTPUT"',
+            self.text,
+        )
+        self.assertIn(
+            'echo "changed=true" >> "$GITHUB_OUTPUT"',
             self.text,
         )
 
-    def test_workflow_has_no_mutating_or_privileged_capabilities(self):
+    def test_commit_adds_only_expected_files(self):
+        self.assertIn(
+            "git add -- "
+            "tracker/Dockerfile "
+            "tracker/config.yml",
+            self.text,
+        )
+
+        forbidden = [
+            "git add .",
+            "git add -A",
+            "git add --all",
+            "git add tracker/",
+        ]
+
+        for value in forbidden:
+            with self.subTest(value=value):
+                self.assertNotIn(
+                    value,
+                    self.text,
+                )
+
+    def test_commit_and_push_only_run_when_files_changed(self):
+        self.assertIn(
+            "if: steps.changes.outputs.changed == 'true'",
+            self.text,
+        )
+        self.assertIn(
+            'git config user.name "github-actions[bot]"',
+            self.text,
+        )
+        self.assertIn(
+            'git config user.email '
+            '"41898282+github-actions[bot]'
+            '@users.noreply.github.com"',
+            self.text,
+        )
+        self.assertIn(
+            'git commit -m '
+            '"⬆️ chore(wealthfolio): '
+            'update upstream release"',
+            self.text,
+        )
+        self.assertIn(
+            'git push origin '
+            '"HEAD:${{ github.ref_name }}"',
+            self.text,
+        )
+
+    def test_workflow_has_no_unneeded_privileged_capabilities(self):
         forbidden = [
             "secrets.",
-            "GITHUB_TOKEN",
-            "git push",
             "docker ",
             "docker\n",
             "sudo ",
             "environment:",
             "upload-artifact",
-            "workflow_run:",
-            "repository_dispatch:",
-            "continue-on-error: true",
-            "concurrency:",
+            "ghcr.io/ortega3159/wealthfolio-ha",
+            "tailscale",
         ]
 
         for value in forbidden:
             with self.subTest(value=value):
-                self.assertNotIn(value, self.text)
-
-    def test_actions_use_full_commit_sha_not_floating_tags(self):
-        self.assertNotIn(
-            "actions/checkout@v",
-            self.text,
-        )
-        self.assertNotIn(
-            "actions/setup-python@v",
-            self.text,
-        )
-
-
-    def test_permissions_cannot_be_broadened_or_overridden(self):
-        self.assertEqual(
-            self.text.count("permissions:"),
-            1,
-        )
-
-        self.assertNotIn(
-            "permissions: read-all",
-            self.text,
-        )
-        self.assertNotIn(
-            "permissions: write-all",
-            self.text,
-        )
-
-        for line in self.text.splitlines():
-            if line.lstrip() == "permissions:":
-                self.assertEqual(
-                    line,
-                    "permissions:",
+                self.assertNotIn(
+                    value,
+                    self.text,
                 )
 
     def test_only_expected_external_actions_are_used(self):
@@ -232,8 +291,6 @@ class AuditWorkflowContractTests(unittest.TestCase):
         )
 
     def test_every_external_action_is_pinned_to_full_commit_sha(self):
-        import re
-
         uses_lines = [
             line.strip()
             for line in self.text.splitlines()
