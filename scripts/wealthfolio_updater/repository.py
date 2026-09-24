@@ -472,6 +472,104 @@ def replace_exact_once(
     return source.replace(old, new, 1)
 
 
+
+def update_local_build_files(
+    *,
+    dockerfile_bytes: bytes,
+    config_bytes: bytes,
+    target_upstream: SemVer,
+    target_wrapper: WrapperVersion,
+    target_digest: str,
+) -> tuple[bytes, bytes]:
+    repository = validate_repository_state(
+        dockerfile_bytes=dockerfile_bytes,
+        config_bytes=config_bytes,
+        state_bytes=None,
+    )
+
+    if (
+        repository.distribution_mode
+        != DistributionMode.LOCAL_BUILD
+    ):
+        raise ValueError(
+            "repository must use local-build distribution"
+        )
+
+    if target_upstream <= repository.upstream_version:
+        raise ValueError(
+            "target upstream version must be newer "
+            "than current upstream version"
+        )
+
+    if target_wrapper.upstream != target_upstream:
+        raise ValueError(
+            "target wrapper upstream version does not "
+            "match target upstream version"
+        )
+
+    target_digest = _validate_digest(
+        target_digest,
+        label="target upstream digest",
+    )
+
+    updated_dockerfile = replace_exact_once(
+        dockerfile_bytes,
+        (
+            "ARG WEALTHFOLIO_VERSION="
+            f"{repository.upstream_version}"
+        ).encode("ascii"),
+        (
+            "ARG WEALTHFOLIO_VERSION="
+            f"{target_upstream}"
+        ).encode("ascii"),
+    )
+
+    updated_dockerfile = replace_exact_once(
+        updated_dockerfile,
+        (
+            "ARG WEALTHFOLIO_DIGEST="
+            f"{repository.upstream_digest}"
+        ).encode("ascii"),
+        (
+            "ARG WEALTHFOLIO_DIGEST="
+            f"{target_digest}"
+        ).encode("ascii"),
+    )
+
+    updated_config = replace_exact_once(
+        config_bytes,
+        (
+            f'version: "{repository.wrapper_version}"'
+        ).encode("ascii"),
+        (
+            f'version: "{target_wrapper}"'
+        ).encode("ascii"),
+    )
+
+    updated_repository = validate_repository_state(
+        dockerfile_bytes=updated_dockerfile,
+        config_bytes=updated_config,
+        state_bytes=None,
+    )
+
+    if updated_repository.upstream_version != target_upstream:
+        raise ValueError(
+            "updated upstream version does not match target"
+        )
+
+    if updated_repository.upstream_digest != target_digest:
+        raise ValueError(
+            "updated upstream digest does not match target"
+        )
+
+    if updated_repository.wrapper_version != target_wrapper:
+        raise ValueError(
+            "updated wrapper version does not match target"
+        )
+
+    return updated_dockerfile, updated_config
+
+
 def insert_after_exact_once(
     source: bytes,
     anchor: bytes,

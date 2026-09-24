@@ -26,6 +26,7 @@ from .repository import (
     detect_line_ending,
     insert_after_exact_once,
     replace_exact_once,
+    update_local_build_files,
     validate_repository_state,
 )
 
@@ -50,5 +51,6 @@ __all__ = [
     "plan_update",
     "replace_exact_once",
     "select_candidate",
+    "update_local_build_files",
     "validate_repository_state",
 ]

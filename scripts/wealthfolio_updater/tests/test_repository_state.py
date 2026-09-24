@@ -5,6 +5,7 @@ from scripts.wealthfolio_updater.updater import (
     DistributionMode,
     SemVer,
     WrapperVersion,
+    update_local_build_files,
     validate_repository_state,
 )
 
@@ -337,6 +338,105 @@ class PrebuiltRepositoryStateTests(unittest.TestCase):
                 ),
             )
 
+
+
+class LocalBuildRepositoryUpdateTests(unittest.TestCase):
+    def test_updates_exact_local_build_pins(self):
+        new_digest = "sha256:" + ("c" * 64)
+
+        updated_dockerfile, updated_config = (
+            update_local_build_files(
+                dockerfile_bytes=make_dockerfile(),
+                config_bytes=make_config(),
+                target_upstream=SemVer.parse("3.8.0"),
+                target_wrapper=WrapperVersion.parse(
+                    "3.8.0-1"
+                ),
+                target_digest=new_digest,
+            )
+        )
+
+        self.assertEqual(
+            updated_dockerfile,
+            make_dockerfile(
+                version="3.8.0",
+                digest=new_digest,
+            ),
+        )
+        self.assertEqual(
+            updated_config,
+            make_config(version="3.8.0-1"),
+        )
+
+        repository = validate_repository_state(
+            dockerfile_bytes=updated_dockerfile,
+            config_bytes=updated_config,
+            state_bytes=None,
+        )
+
+        self.assertEqual(
+            repository.upstream_version,
+            SemVer.parse("3.8.0"),
+        )
+        self.assertEqual(
+            repository.upstream_digest,
+            new_digest,
+        )
+        self.assertEqual(
+            repository.wrapper_version,
+            WrapperVersion.parse("3.8.0-1"),
+        )
+        self.assertEqual(
+            repository.distribution_mode,
+            DistributionMode.LOCAL_BUILD,
+        )
+
+    def test_same_or_older_upstream_is_rejected(self):
+        cases = [
+            ("3.6.3", "3.6.3-5"),
+            ("3.5.9", "3.5.9-1"),
+        ]
+
+        for upstream, wrapper in cases:
+            with self.subTest(upstream=upstream):
+                with self.assertRaises(ValueError):
+                    update_local_build_files(
+                        dockerfile_bytes=make_dockerfile(),
+                        config_bytes=make_config(),
+                        target_upstream=SemVer.parse(
+                            upstream
+                        ),
+                        target_wrapper=WrapperVersion.parse(
+                            wrapper
+                        ),
+                        target_digest=(
+                            "sha256:" + ("c" * 64)
+                        ),
+                    )
+
+    def test_target_wrapper_must_match_target_upstream(self):
+        with self.assertRaises(ValueError):
+            update_local_build_files(
+                dockerfile_bytes=make_dockerfile(),
+                config_bytes=make_config(),
+                target_upstream=SemVer.parse("3.8.0"),
+                target_wrapper=WrapperVersion.parse(
+                    "3.7.0-1"
+                ),
+                target_digest="sha256:" + ("c" * 64),
+            )
+
+    def test_invalid_target_digest_is_rejected(self):
+        with self.assertRaises(ValueError):
+            update_local_build_files(
+                dockerfile_bytes=make_dockerfile(),
+                config_bytes=make_config(),
+                target_upstream=SemVer.parse("3.8.0"),
+                target_wrapper=WrapperVersion.parse(
+                    "3.8.0-1"
+                ),
+                target_digest="not-a-digest",
+            )
 
 if __name__ == "__main__":
     unittest.main()
