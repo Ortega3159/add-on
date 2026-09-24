@@ -1,9 +1,6 @@
 name: Wealthfolio updater
 
 on:
-  push:
-    branches:
-      - feat/wealthfolio-auto-update
   schedule:
     - cron: '37 */6 * * *'
   workflow_dispatch:

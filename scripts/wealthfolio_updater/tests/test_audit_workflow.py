@@ -22,14 +22,7 @@ class UpdaterWorkflowContractTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-    def test_triggers_feature_push_schedule_and_manual_dispatch(self):
-        self.assertIn(
-            "push:\n"
-            "    branches:\n"
-            "      - feat/wealthfolio-auto-update\n",
-            self.text,
-        )
-
+    def test_triggers_schedule_and_manual_dispatch_only(self):
         self.assertIn(
             "schedule:\n"
             "    - cron: '37 */6 * * *'\n",
@@ -42,6 +35,7 @@ class UpdaterWorkflowContractTests(unittest.TestCase):
         )
 
         forbidden = [
+            "push:",
             "pull_request:",
             "pull_request_target:",
             "workflow_run:",
