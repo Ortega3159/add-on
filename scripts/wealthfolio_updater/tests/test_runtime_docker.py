@@ -2284,3 +2284,1180 @@ class RuntimeCleanupTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RuntimeHttpResponseTests(unittest.TestCase):
+    def test_parse_http_response_returns_structured_response(self):
+        body = b'{"authenticated":true}'
+
+        response = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: application/json\r\n"
+            b"X-Test: one\r\n"
+            b"X-Test: two\r\n"
+            b"\r\n"
+            + body
+        )
+
+        result = runtime_docker.parse_runtime_http_response(
+            response
+        )
+
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.reason_phrase, "OK")
+        self.assertEqual(
+            result.headers,
+            (
+                ("Content-Type", "application/json"),
+                ("X-Test", "one"),
+                ("X-Test", "two"),
+            ),
+        )
+        self.assertEqual(result.body, body)
+
+    def test_parse_http_response_decodes_chunked_body(self):
+        response = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"\r\n"
+            b"16\r\n"
+            b'{"authenticated":true}\r\n'
+            b"0\r\n"
+            b"\r\n"
+        )
+
+        result = runtime_docker.parse_runtime_http_response(
+            response
+        )
+
+        self.assertEqual(
+            result.body,
+            b'{"authenticated":true}',
+        )
+
+    def test_parse_http_response_rejects_malformed_response(self):
+        invalid_responses = (
+            b"",
+            b"not-http",
+            b"HTTP/1.0 200 OK\r\n\r\n",
+            (
+                b"HTTP/1.1 200 OK\r\n"
+                b"broken-header\r\n"
+                b"\r\n"
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Transfer-Encoding: chunked\r\n"
+                b"\r\n"
+                b"zz\r\n"
+            ),
+        )
+
+        for response in invalid_responses:
+            with self.subTest(response=response):
+                with self.assertRaisesRegex(
+                    DockerRuntimeError,
+                    r"^runtime HTTP response is invalid$",
+                ):
+                    runtime_docker.parse_runtime_http_response(
+                        response
+                    )
+
+    def test_session_cookie_repr_does_not_expose_value(self):
+        session = runtime_docker.RuntimeSessionCookie(
+            value="super-secret-session-value",
+        )
+
+        rendered = repr(session)
+
+        self.assertNotIn(
+            "super-secret-session-value",
+            rendered,
+        )
+        self.assertIn(
+            "RuntimeSessionCookie",
+            rendered,
+        )
+
+
+
+class RuntimeAuthenticationTests(unittest.TestCase):
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_http_exchange"
+    )
+    def test_login_returns_session_cookie(
+        self,
+        http_exchange,
+    ):
+        http_exchange.return_value = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Set-Cookie: "
+            b"wf_session=secret-session-value; "
+            b"HttpOnly; SameSite=Lax; Path=/; "
+            b"Max-Age=28800\r\n"
+            b"\r\n"
+            b'{"authenticated":true,"expiresIn":28800}'
+        )
+
+        container = runtime_docker.RuntimeContainer(
+            container_id="b" * 64,
+        )
+
+        session = runtime_docker.runtime_login(
+            container=container,
+            password="password",
+        )
+
+        self.assertIsInstance(
+            session,
+            runtime_docker.RuntimeSessionCookie,
+        )
+        self.assertEqual(
+            session.value,
+            "secret-session-value",
+        )
+        self.assertNotIn(
+            "secret-session-value",
+            repr(session),
+        )
+
+        payload = b'{"password":"password"}'
+
+        http_exchange.assert_called_once_with(
+            container=container,
+            request_bytes=(
+                b"POST /api/v1/auth/login HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Accept: application/json\r\n"
+                b"Content-Type: application/json\r\n"
+                + (
+                    f"Content-Length: {len(payload)}\r\n"
+                ).encode("ascii")
+                + b"Connection: close\r\n"
+                b"\r\n"
+                + payload
+            ),
+        )
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_http_exchange"
+    )
+    def test_login_rejects_invalid_cookie_response(
+        self,
+        http_exchange,
+    ):
+        responses = (
+            (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                b"\r\n"
+                b'{"authenticated":true,"expiresIn":28800}'
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Set-Cookie: other=value\r\n"
+                b"\r\n"
+                b'{"authenticated":true,"expiresIn":28800}'
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Set-Cookie: wf_session=\r\n"
+                b"\r\n"
+                b'{"authenticated":true,"expiresIn":28800}'
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Set-Cookie: wf_session=one\r\n"
+                b"Set-Cookie: wf_session=two\r\n"
+                b"\r\n"
+                b'{"authenticated":true,"expiresIn":28800}'
+            ),
+        )
+
+        container = runtime_docker.RuntimeContainer(
+            container_id="b" * 64,
+        )
+
+        for response in responses:
+            with self.subTest(response=response):
+                http_exchange.reset_mock()
+                http_exchange.return_value = response
+
+                with self.assertRaisesRegex(
+                    DockerRuntimeError,
+                    r"^runtime login response is invalid$",
+                ):
+                    runtime_docker.runtime_login(
+                        container=container,
+                        password="password",
+                    )
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_http_exchange"
+    )
+    def test_login_rejects_non_200_response(
+        self,
+        http_exchange,
+    ):
+        http_exchange.return_value = (
+            b"HTTP/1.1 401 Unauthorized\r\n"
+            b"Content-Type: application/json\r\n"
+            b"\r\n"
+            b'{"message":"invalid password"}'
+        )
+
+        container = runtime_docker.RuntimeContainer(
+            container_id="b" * 64,
+        )
+
+        with self.assertRaisesRegex(
+            DockerRuntimeError,
+            r"^runtime login failed$",
+        ):
+            runtime_docker.runtime_login(
+                container=container,
+                password="password",
+            )
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_http_exchange"
+    )
+    def test_auth_me_accepts_authenticated_session(
+        self,
+        http_exchange,
+    ):
+        http_exchange.return_value = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: application/json\r\n"
+            b"\r\n"
+            b'{"authenticated":true}'
+        )
+
+        container = runtime_docker.RuntimeContainer(
+            container_id="b" * 64,
+        )
+        session = runtime_docker.RuntimeSessionCookie(
+            value="secret-session-value",
+        )
+
+        result = runtime_docker.runtime_auth_me(
+            container=container,
+            session=session,
+        )
+
+        self.assertIs(result, True)
+
+        http_exchange.assert_called_once_with(
+            container=container,
+            request_bytes=(
+                b"GET /api/v1/auth/me HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Accept: application/json\r\n"
+                b"Cookie: "
+                b"wf_session=secret-session-value\r\n"
+                b"Connection: close\r\n"
+                b"\r\n"
+            ),
+        )
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_http_exchange"
+    )
+    def test_auth_me_rejects_invalid_response(
+        self,
+        http_exchange,
+    ):
+        responses = (
+            (
+                b"HTTP/1.1 401 Unauthorized\r\n"
+                b"Content-Type: application/json\r\n"
+                b"\r\n"
+                b'{"code":401,"message":"Unauthorized"}'
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                b"\r\n"
+                b"not-json"
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                b"\r\n"
+                b'{"authenticated":false}'
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                b"\r\n"
+                b"{}"
+            ),
+        )
+
+        container = runtime_docker.RuntimeContainer(
+            container_id="b" * 64,
+        )
+        session = runtime_docker.RuntimeSessionCookie(
+            value="secret-session-value",
+        )
+
+        for response in responses:
+            with self.subTest(response=response):
+                http_exchange.reset_mock()
+                http_exchange.return_value = response
+
+                with self.assertRaisesRegex(
+                    DockerRuntimeError,
+                    r"^runtime authentication check failed$",
+                ):
+                    runtime_docker.runtime_auth_me(
+                        container=container,
+                        session=session,
+                    )
+
+
+class RuntimeAccountReadTests(unittest.TestCase):
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_http_exchange"
+    )
+    def test_get_accounts_returns_account_list(
+        self,
+        http_exchange,
+    ):
+        http_exchange.return_value = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: application/json\r\n"
+            b"\r\n"
+            b'[{"id":"account-1","name":"Test Cash"}]'
+        )
+
+        container = runtime_docker.RuntimeContainer(
+            container_id="b" * 64,
+        )
+        session = runtime_docker.RuntimeSessionCookie(
+            value="secret-session-value",
+        )
+
+        accounts = runtime_docker.runtime_get_accounts(
+            container=container,
+            session=session,
+        )
+
+        self.assertEqual(
+            accounts,
+            [
+                {
+                    "id": "account-1",
+                    "name": "Test Cash",
+                }
+            ],
+        )
+
+        http_exchange.assert_called_once_with(
+            container=container,
+            request_bytes=(
+                b"GET /api/v1/accounts HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Accept: application/json\r\n"
+                b"Cookie: "
+                b"wf_session=secret-session-value\r\n"
+                b"Connection: close\r\n"
+                b"\r\n"
+            ),
+        )
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_http_exchange"
+    )
+    def test_get_accounts_accepts_empty_list(
+        self,
+        http_exchange,
+    ):
+        http_exchange.return_value = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: application/json\r\n"
+            b"\r\n"
+            b"[]"
+        )
+
+        accounts = runtime_docker.runtime_get_accounts(
+            container=runtime_docker.RuntimeContainer(
+                container_id="b" * 64,
+            ),
+            session=runtime_docker.RuntimeSessionCookie(
+                value="secret-session-value",
+            ),
+        )
+
+        self.assertEqual(accounts, [])
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_http_exchange"
+    )
+    def test_get_accounts_rejects_invalid_response(
+        self,
+        http_exchange,
+    ):
+        responses = (
+            (
+                b"HTTP/1.1 401 Unauthorized\r\n"
+                b"Content-Type: application/json\r\n"
+                b"\r\n"
+                b'{"code":401,"message":"Unauthorized"}'
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                b"\r\n"
+                b"not-json"
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                b"\r\n"
+                b'{"id":"not-a-list"}'
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                b"\r\n"
+                b'["not-an-account-object"]'
+            ),
+        )
+
+        container = runtime_docker.RuntimeContainer(
+            container_id="b" * 64,
+        )
+        session = runtime_docker.RuntimeSessionCookie(
+            value="secret-session-value",
+        )
+
+        for response in responses:
+            with self.subTest(response=response):
+                http_exchange.reset_mock()
+                http_exchange.return_value = response
+
+                with self.assertRaisesRegex(
+                    DockerRuntimeError,
+                    r"^runtime accounts response is invalid$",
+                ):
+                    runtime_docker.runtime_get_accounts(
+                        container=container,
+                        session=session,
+                    )
+
+
+
+class RuntimeAccountWriteTests(unittest.TestCase):
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_get_accounts"
+    )
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_http_exchange"
+    )
+    def test_create_cash_account_confirms_by_readback(
+        self,
+        http_exchange,
+        get_accounts,
+    ):
+        http_exchange.return_value = b""
+
+        get_accounts.return_value = [
+            {
+                "id": "account-1",
+                "name": "WU4C Test Cash",
+                "accountType": "CASH",
+                "currency": "USD",
+                "isDefault": False,
+                "isActive": True,
+            }
+        ]
+
+        container = runtime_docker.RuntimeContainer(
+            container_id="b" * 64,
+        )
+        session = runtime_docker.RuntimeSessionCookie(
+            value="secret-session-value",
+        )
+
+        account = runtime_docker.runtime_create_cash_account(
+            container=container,
+            session=session,
+            name="WU4C Test Cash",
+            currency="USD",
+        )
+
+        self.assertEqual(
+            account["id"],
+            "account-1",
+        )
+
+        http_exchange.assert_called_once()
+
+        request = http_exchange.call_args.kwargs[
+            "request_bytes"
+        ]
+
+        self.assertIn(
+            b"POST /api/v1/accounts HTTP/1.1\r\n",
+            request,
+        )
+        self.assertIn(
+            b'"name":"WU4C Test Cash"',
+            request,
+        )
+        self.assertIn(
+            b'"accountType":"CASH"',
+            request,
+        )
+        self.assertIn(
+            b'"currency":"USD"',
+            request,
+        )
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_get_accounts"
+    )
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_http_exchange"
+    )
+    def test_create_cash_account_requires_exact_readback(
+        self,
+        http_exchange,
+        get_accounts,
+    ):
+        http_exchange.return_value = b""
+
+        invalid_account_sets = (
+            [],
+            [
+                {
+                    "id": "account-1",
+                    "name": "Other",
+                    "accountType": "CASH",
+                    "currency": "USD",
+                }
+            ],
+            [
+                {
+                    "id": "account-1",
+                    "name": "WU4C Test Cash",
+                    "accountType": "CASH",
+                    "currency": "USD",
+                },
+                {
+                    "id": "account-2",
+                    "name": "WU4C Test Cash",
+                    "accountType": "CASH",
+                    "currency": "USD",
+                },
+            ],
+            [
+                {
+                    "id": "",
+                    "name": "WU4C Test Cash",
+                    "accountType": "CASH",
+                    "currency": "USD",
+                }
+            ],
+        )
+
+        container = runtime_docker.RuntimeContainer(
+            container_id="b" * 64,
+        )
+        session = runtime_docker.RuntimeSessionCookie(
+            value="secret-session-value",
+        )
+
+        for accounts in invalid_account_sets:
+            with self.subTest(accounts=accounts):
+                http_exchange.reset_mock()
+                get_accounts.return_value = accounts
+
+                with self.assertRaisesRegex(
+                    DockerRuntimeError,
+                    r"^runtime account creation could not be confirmed$",
+                ):
+                    runtime_docker.runtime_create_cash_account(
+                        container=container,
+                        session=session,
+                        name="WU4C Test Cash",
+                        currency="USD",
+                    )
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_get_accounts"
+    )
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_http_exchange"
+    )
+    def test_create_cash_account_rejects_explicit_http_failure(
+        self,
+        http_exchange,
+        get_accounts,
+    ):
+        http_exchange.return_value = (
+            b"HTTP/1.1 422 Unprocessable Entity\r\n"
+            b"Content-Type: text/plain\r\n"
+            b"\r\n"
+            b"invalid account"
+        )
+
+        with self.assertRaisesRegex(
+            DockerRuntimeError,
+            r"^runtime account creation failed$",
+        ):
+            runtime_docker.runtime_create_cash_account(
+                container=runtime_docker.RuntimeContainer(
+                    container_id="b" * 64,
+                ),
+                session=runtime_docker.RuntimeSessionCookie(
+                    value="secret-session-value",
+                ),
+                name="WU4C Test Cash",
+                currency="USD",
+            )
+
+        get_accounts.assert_not_called()
+
+
+
+class RuntimeDepositTests(unittest.TestCase):
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_http_exchange"
+    )
+    def test_search_deposits_returns_data_list(
+        self,
+        http_exchange,
+    ):
+        http_exchange.return_value = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: application/json\r\n"
+            b"\r\n"
+            b'{"data":[{'
+            b'"id":"activity-1",'
+            b'"accountId":"account-1",'
+            b'"activityType":"DEPOSIT",'
+            b'"status":"POSTED",'
+            b'"date":"2026-01-15T12:00:00+00:00",'
+            b'"amount":"123.45",'
+            b'"currency":"USD",'
+            b'"comment":"WU4C deterministic deposit"'
+            b'}],"meta":{"total":1}}'
+        )
+
+        container = runtime_docker.RuntimeContainer(
+            container_id="b" * 64,
+        )
+        session = runtime_docker.RuntimeSessionCookie(
+            value="secret-session-value",
+        )
+
+        activities = runtime_docker.runtime_search_deposits(
+            container=container,
+            session=session,
+            account_id="account-1",
+        )
+
+        self.assertEqual(len(activities), 1)
+        self.assertEqual(
+            activities[0]["id"],
+            "activity-1",
+        )
+
+        request = http_exchange.call_args.kwargs[
+            "request_bytes"
+        ]
+
+        self.assertIn(
+            b"POST /api/v1/activities/search HTTP/1.1\r\n",
+            request,
+        )
+        self.assertIn(
+            b'"page":0',
+            request,
+        )
+        self.assertIn(
+            b'"pageSize":20',
+            request,
+        )
+        self.assertIn(
+            b'"accountIdFilter":"account-1"',
+            request,
+        )
+        self.assertIn(
+            b'"activityTypeFilter":"DEPOSIT"',
+            request,
+        )
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_http_exchange"
+    )
+    def test_search_deposits_rejects_invalid_response(
+        self,
+        http_exchange,
+    ):
+        responses = (
+            (
+                b"HTTP/1.1 401 Unauthorized\r\n"
+                b"Content-Type: application/json\r\n"
+                b"\r\n"
+                b'{"message":"Unauthorized"}'
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                b"\r\n"
+                b"not-json"
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                b"\r\n"
+                b'{"data":{},"meta":{}}'
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                b"\r\n"
+                b'{"data":["not-an-object"],"meta":{}}'
+            ),
+        )
+
+        container = runtime_docker.RuntimeContainer(
+            container_id="b" * 64,
+        )
+        session = runtime_docker.RuntimeSessionCookie(
+            value="secret-session-value",
+        )
+
+        for response in responses:
+            with self.subTest(response=response):
+                http_exchange.reset_mock()
+                http_exchange.return_value = response
+
+                with self.assertRaisesRegex(
+                    DockerRuntimeError,
+                    r"^runtime activities response is invalid$",
+                ):
+                    runtime_docker.runtime_search_deposits(
+                        container=container,
+                        session=session,
+                        account_id="account-1",
+                    )
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_search_deposits"
+    )
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_http_exchange"
+    )
+    def test_create_test_deposit_confirms_by_readback(
+        self,
+        http_exchange,
+        search_deposits,
+    ):
+        http_exchange.return_value = b""
+
+        search_deposits.return_value = [
+            {
+                "id": "activity-1",
+                "accountId": "account-1",
+                "activityType": "DEPOSIT",
+                "status": "POSTED",
+                "date": "2026-01-15T12:00:00+00:00",
+                "amount": "123.45",
+                "currency": "USD",
+                "comment": "WU4C deterministic deposit",
+            }
+        ]
+
+        container = runtime_docker.RuntimeContainer(
+            container_id="b" * 64,
+        )
+        session = runtime_docker.RuntimeSessionCookie(
+            value="secret-session-value",
+        )
+
+        activity = (
+            runtime_docker.runtime_create_test_deposit(
+                container=container,
+                session=session,
+                account_id="account-1",
+            )
+        )
+
+        self.assertEqual(
+            activity["id"],
+            "activity-1",
+        )
+
+        request = http_exchange.call_args.kwargs[
+            "request_bytes"
+        ]
+
+        self.assertIn(
+            b"POST /api/v1/activities HTTP/1.1\r\n",
+            request,
+        )
+        self.assertIn(
+            b'"accountId":"account-1"',
+            request,
+        )
+        self.assertIn(
+            b'"activityType":"DEPOSIT"',
+            request,
+        )
+        self.assertIn(
+            b'"activityDate":"2026-01-15T12:00:00.000Z"',
+            request,
+        )
+        self.assertIn(
+            b'"amount":123.45',
+            request,
+        )
+        self.assertIn(
+            b'"currency":"USD"',
+            request,
+        )
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_search_deposits"
+    )
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_http_exchange"
+    )
+    def test_create_test_deposit_requires_exact_readback(
+        self,
+        http_exchange,
+        search_deposits,
+    ):
+        http_exchange.return_value = b""
+
+        invalid_sets = (
+            [],
+            [
+                {
+                    "id": "activity-1",
+                    "accountId": "other-account",
+                    "activityType": "DEPOSIT",
+                    "status": "POSTED",
+                    "date": "2026-01-15T12:00:00+00:00",
+                    "amount": "123.45",
+                    "currency": "USD",
+                    "comment": "WU4C deterministic deposit",
+                }
+            ],
+            [
+                {
+                    "id": "activity-1",
+                    "accountId": "account-1",
+                    "activityType": "DEPOSIT",
+                    "status": "POSTED",
+                    "date": "2026-01-15T12:00:00+00:00",
+                    "amount": "999.00",
+                    "currency": "USD",
+                    "comment": "WU4C deterministic deposit",
+                }
+            ],
+            [
+                {
+                    "id": "",
+                    "accountId": "account-1",
+                    "activityType": "DEPOSIT",
+                    "status": "POSTED",
+                    "date": "2026-01-15T12:00:00+00:00",
+                    "amount": "123.45",
+                    "currency": "USD",
+                    "comment": "WU4C deterministic deposit",
+                }
+            ],
+        )
+
+        container = runtime_docker.RuntimeContainer(
+            container_id="b" * 64,
+        )
+        session = runtime_docker.RuntimeSessionCookie(
+            value="secret-session-value",
+        )
+
+        for activities in invalid_sets:
+            with self.subTest(activities=activities):
+                http_exchange.reset_mock()
+                search_deposits.return_value = activities
+
+                with self.assertRaisesRegex(
+                    DockerRuntimeError,
+                    r"^runtime deposit creation could not be confirmed$",
+                ):
+                    runtime_docker.runtime_create_test_deposit(
+                        container=container,
+                        session=session,
+                        account_id="account-1",
+                    )
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_search_deposits"
+    )
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_http_exchange"
+    )
+    def test_create_test_deposit_rejects_explicit_http_failure(
+        self,
+        http_exchange,
+        search_deposits,
+    ):
+        http_exchange.return_value = (
+            b"HTTP/1.1 422 Unprocessable Entity\r\n"
+            b"Content-Type: text/plain\r\n"
+            b"\r\n"
+            b"invalid activity"
+        )
+
+        with self.assertRaisesRegex(
+            DockerRuntimeError,
+            r"^runtime deposit creation failed$",
+        ):
+            runtime_docker.runtime_create_test_deposit(
+                container=runtime_docker.RuntimeContainer(
+                    container_id="b" * 64,
+                ),
+                session=runtime_docker.RuntimeSessionCookie(
+                    value="secret-session-value",
+                ),
+                account_id="account-1",
+            )
+
+        search_deposits.assert_not_called()
+
+
+
+class RuntimeFunctionalSnapshotTests(unittest.TestCase):
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_search_deposits"
+    )
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_get_accounts"
+    )
+    def test_capture_functional_snapshot(
+        self,
+        get_accounts,
+        search_deposits,
+    ):
+        get_accounts.return_value = [
+            {
+                "id": "account-1",
+                "name": "WU4C Test Cash",
+                "accountType": "CASH",
+                "currency": "USD",
+                "isDefault": False,
+                "isActive": True,
+            }
+        ]
+
+        search_deposits.return_value = [
+            {
+                "id": "activity-1",
+                "accountId": "account-1",
+                "activityType": "DEPOSIT",
+                "status": "POSTED",
+                "date": "2026-01-15T12:00:00+00:00",
+                "amount": "123.45",
+                "currency": "USD",
+                "comment": "WU4C deterministic deposit",
+            }
+        ]
+
+        container = runtime_docker.RuntimeContainer(
+            container_id="b" * 64,
+        )
+        session = runtime_docker.RuntimeSessionCookie(
+            value="secret-session-value",
+        )
+
+        snapshot = (
+            runtime_docker.capture_runtime_functional_snapshot(
+                container=container,
+                session=session,
+                account_id="account-1",
+            )
+        )
+
+        self.assertEqual(
+            snapshot.account_id,
+            "account-1",
+        )
+        self.assertEqual(
+            snapshot.activity_id,
+            "activity-1",
+        )
+        self.assertEqual(
+            snapshot.account_name,
+            "WU4C Test Cash",
+        )
+        self.assertEqual(
+            snapshot.account_type,
+            "CASH",
+        )
+        self.assertEqual(
+            snapshot.account_currency,
+            "USD",
+        )
+        self.assertEqual(
+            snapshot.activity_type,
+            "DEPOSIT",
+        )
+        self.assertEqual(
+            snapshot.activity_status,
+            "POSTED",
+        )
+        self.assertEqual(
+            snapshot.activity_date,
+            "2026-01-15T12:00:00+00:00",
+        )
+        self.assertEqual(
+            snapshot.amount,
+            "123.45",
+        )
+        self.assertEqual(
+            snapshot.activity_currency,
+            "USD",
+        )
+        self.assertEqual(
+            snapshot.comment,
+            "WU4C deterministic deposit",
+        )
+
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_search_deposits"
+    )
+    @patch(
+        "scripts.wealthfolio_updater."
+        "runtime_docker.runtime_get_accounts"
+    )
+    def test_capture_functional_snapshot_fails_closed(
+        self,
+        get_accounts,
+        search_deposits,
+    ):
+        invalid_cases = (
+            (
+                [],
+                [],
+            ),
+            (
+                [
+                    {
+                        "id": "other-account",
+                        "name": "WU4C Test Cash",
+                        "accountType": "CASH",
+                        "currency": "USD",
+                        "isDefault": False,
+                        "isActive": True,
+                    }
+                ],
+                [],
+            ),
+            (
+                [
+                    {
+                        "id": "account-1",
+                        "name": "Wrong Name",
+                        "accountType": "CASH",
+                        "currency": "USD",
+                        "isDefault": False,
+                        "isActive": True,
+                    }
+                ],
+                [],
+            ),
+            (
+                [
+                    {
+                        "id": "account-1",
+                        "name": "WU4C Test Cash",
+                        "accountType": "CASH",
+                        "currency": "USD",
+                        "isDefault": False,
+                        "isActive": True,
+                    }
+                ],
+                [],
+            ),
+            (
+                [
+                    {
+                        "id": "account-1",
+                        "name": "WU4C Test Cash",
+                        "accountType": "CASH",
+                        "currency": "USD",
+                        "isDefault": False,
+                        "isActive": True,
+                    }
+                ],
+                [
+                    {
+                        "id": "activity-1",
+                        "accountId": "account-1",
+                        "activityType": "DEPOSIT",
+                        "status": "POSTED",
+                        "date": "2026-01-15T12:00:00+00:00",
+                        "amount": "999.00",
+                        "currency": "USD",
+                        "comment": "WU4C deterministic deposit",
+                    }
+                ],
+            ),
+        )
+
+        container = runtime_docker.RuntimeContainer(
+            container_id="b" * 64,
+        )
+        session = runtime_docker.RuntimeSessionCookie(
+            value="secret-session-value",
+        )
+
+        for accounts, deposits in invalid_cases:
+            with self.subTest(
+                accounts=accounts,
+                deposits=deposits,
+            ):
+                get_accounts.return_value = accounts
+                search_deposits.return_value = deposits
+
+                with self.assertRaisesRegex(
+                    DockerRuntimeError,
+                    r"^runtime functional snapshot is invalid$",
+                ):
+                    runtime_docker.capture_runtime_functional_snapshot(
+                        container=container,
+                        session=session,
+                        account_id="account-1",
+                    )

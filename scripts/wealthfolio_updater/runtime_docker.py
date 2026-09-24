@@ -638,6 +638,828 @@ def runtime_http_exchange(
     )
 
 
+
+@dataclass(frozen=True)
+class RuntimeHttpResponse:
+    status_code: int
+    reason_phrase: str
+    headers: tuple[tuple[str, str], ...]
+    body: bytes
+
+
+@dataclass(frozen=True, repr=False)
+class RuntimeSessionCookie:
+    value: str
+
+    def __post_init__(self) -> None:
+        if type(self.value) is not str or not self.value:
+            raise DockerRuntimeError(
+                "runtime session cookie is invalid"
+            )
+
+    def __repr__(self) -> str:
+        return "RuntimeSessionCookie(<redacted>)"
+
+
+def _decode_runtime_chunked_body(
+    body: bytes,
+) -> bytes:
+    decoded = bytearray()
+    position = 0
+
+    while True:
+        line_end = body.find(
+            b"\r\n",
+            position,
+        )
+
+        if line_end < 0:
+            raise DockerRuntimeError(
+                "runtime HTTP response is invalid"
+            )
+
+        size_field = body[
+            position:line_end
+        ].split(
+            b";",
+            1,
+        )[0]
+
+        try:
+            size = int(
+                size_field,
+                16,
+            )
+        except ValueError as exc:
+            raise DockerRuntimeError(
+                "runtime HTTP response is invalid"
+            ) from exc
+
+        position = line_end + 2
+
+        if size == 0:
+            if body[position:] != b"\r\n":
+                raise DockerRuntimeError(
+                    "runtime HTTP response is invalid"
+                )
+
+            return bytes(decoded)
+
+        chunk_end = position + size
+
+        if chunk_end + 2 > len(body):
+            raise DockerRuntimeError(
+                "runtime HTTP response is invalid"
+            )
+
+        decoded.extend(
+            body[position:chunk_end]
+        )
+
+        if body[
+            chunk_end:chunk_end + 2
+        ] != b"\r\n":
+            raise DockerRuntimeError(
+                "runtime HTTP response is invalid"
+            )
+
+        position = chunk_end + 2
+
+
+def parse_runtime_http_response(
+    response: bytes,
+) -> RuntimeHttpResponse:
+    if type(response) is not bytes:
+        raise TypeError(
+            "response must be bytes"
+        )
+
+    head, separator, body = response.partition(
+        b"\r\n\r\n"
+    )
+
+    if separator != b"\r\n\r\n":
+        raise DockerRuntimeError(
+            "runtime HTTP response is invalid"
+        )
+
+    lines = head.split(b"\r\n")
+
+    if not lines:
+        raise DockerRuntimeError(
+            "runtime HTTP response is invalid"
+        )
+
+    status_parts = lines[0].split(
+        b" ",
+        2,
+    )
+
+    if (
+        len(status_parts) != 3
+        or status_parts[0] != b"HTTP/1.1"
+        or len(status_parts[1]) != 3
+        or not status_parts[1].isdigit()
+    ):
+        raise DockerRuntimeError(
+            "runtime HTTP response is invalid"
+        )
+
+    status_code = int(
+        status_parts[1]
+    )
+
+    if not 100 <= status_code <= 599:
+        raise DockerRuntimeError(
+            "runtime HTTP response is invalid"
+        )
+
+    try:
+        reason_phrase = status_parts[2].decode(
+            "ascii"
+        )
+    except UnicodeDecodeError as exc:
+        raise DockerRuntimeError(
+            "runtime HTTP response is invalid"
+        ) from exc
+
+    headers = []
+
+    for line in lines[1:]:
+        name, colon, value = line.partition(
+            b":"
+        )
+
+        if colon != b":" or not name:
+            raise DockerRuntimeError(
+                "runtime HTTP response is invalid"
+            )
+
+        try:
+            header_name = name.decode(
+                "ascii"
+            )
+            header_value = value.decode(
+                "latin-1"
+            ).strip()
+        except UnicodeDecodeError as exc:
+            raise DockerRuntimeError(
+                "runtime HTTP response is invalid"
+            ) from exc
+
+        headers.append(
+            (
+                header_name,
+                header_value,
+            )
+        )
+
+    transfer_encodings = [
+        value.lower()
+        for name, value in headers
+        if name.lower()
+        == "transfer-encoding"
+    ]
+
+    if (
+        transfer_encodings
+        and "chunked"
+        in transfer_encodings[-1]
+    ):
+        body = _decode_runtime_chunked_body(
+            body
+        )
+
+    return RuntimeHttpResponse(
+        status_code=status_code,
+        reason_phrase=reason_phrase,
+        headers=tuple(headers),
+        body=body,
+    )
+
+
+
+def _runtime_request_bytes(
+    *,
+    method: str,
+    path: str,
+    json_body: object | None = None,
+    session: RuntimeSessionCookie | None = None,
+) -> bytes:
+    headers = [
+        f"{method} {path} HTTP/1.1",
+        "Host: 127.0.0.1",
+        "Accept: application/json",
+    ]
+
+    payload = b""
+
+    if json_body is not None:
+        payload = json.dumps(
+            json_body,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        headers.append(
+            "Content-Type: application/json"
+        )
+        headers.append(
+            f"Content-Length: {len(payload)}"
+        )
+
+    if session is not None:
+        if not isinstance(
+            session,
+            RuntimeSessionCookie,
+        ):
+            raise TypeError(
+                "session must be a RuntimeSessionCookie"
+            )
+
+        headers.append(
+            f"Cookie: wf_session={session.value}"
+        )
+
+    headers.append("Connection: close")
+
+    return (
+        "\r\n".join(headers).encode("ascii")
+        + b"\r\n\r\n"
+        + payload
+    )
+
+
+def _runtime_json_response(
+    response: RuntimeHttpResponse,
+    *,
+    error_message: str,
+) -> object:
+    try:
+        return json.loads(
+            response.body.decode("utf-8")
+        )
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ) as exc:
+        raise DockerRuntimeError(
+            error_message
+        ) from exc
+
+
+def runtime_login(
+    *,
+    container: RuntimeContainer,
+    password: str,
+) -> RuntimeSessionCookie:
+    if type(password) is not str or not password:
+        raise DockerRuntimeError(
+            "runtime login password is invalid"
+        )
+
+    raw_response = runtime_http_exchange(
+        container=container,
+        request_bytes=_runtime_request_bytes(
+            method="POST",
+            path="/api/v1/auth/login",
+            json_body={
+                "password": password,
+            },
+        ),
+    )
+
+    try:
+        response = parse_runtime_http_response(
+            raw_response
+        )
+    except DockerRuntimeError as exc:
+        raise DockerRuntimeError(
+            "runtime login response is invalid"
+        ) from exc
+
+    if response.status_code != 200:
+        raise DockerRuntimeError(
+            "runtime login failed"
+        )
+
+    payload = _runtime_json_response(
+        response,
+        error_message=(
+            "runtime login response is invalid"
+        ),
+    )
+
+    if (
+        type(payload) is not dict
+        or payload.get("authenticated") is not True
+        or type(payload.get("expiresIn")) is not int
+        or payload["expiresIn"] <= 0
+    ):
+        raise DockerRuntimeError(
+            "runtime login response is invalid"
+        )
+
+    session_values = []
+
+    for name, value in response.headers:
+        if name.lower() != "set-cookie":
+            continue
+
+        pair = value.split(
+            ";",
+            1,
+        )[0]
+
+        cookie_name, separator, cookie_value = (
+            pair.partition("=")
+        )
+
+        if (
+            separator == "="
+            and cookie_name.strip()
+            == "wf_session"
+        ):
+            session_values.append(
+                cookie_value
+            )
+
+    if (
+        len(session_values) != 1
+        or not session_values[0]
+    ):
+        raise DockerRuntimeError(
+            "runtime login response is invalid"
+        )
+
+    return RuntimeSessionCookie(
+        value=session_values[0],
+    )
+
+
+def runtime_auth_me(
+    *,
+    container: RuntimeContainer,
+    session: RuntimeSessionCookie,
+) -> bool:
+    if not isinstance(
+        session,
+        RuntimeSessionCookie,
+    ):
+        raise TypeError(
+            "session must be a RuntimeSessionCookie"
+        )
+
+    raw_response = runtime_http_exchange(
+        container=container,
+        request_bytes=_runtime_request_bytes(
+            method="GET",
+            path="/api/v1/auth/me",
+            session=session,
+        ),
+    )
+
+    try:
+        response = parse_runtime_http_response(
+            raw_response
+        )
+    except DockerRuntimeError as exc:
+        raise DockerRuntimeError(
+            "runtime authentication check failed"
+        ) from exc
+
+    if response.status_code != 200:
+        raise DockerRuntimeError(
+            "runtime authentication check failed"
+        )
+
+    payload = _runtime_json_response(
+        response,
+        error_message=(
+            "runtime authentication check failed"
+        ),
+    )
+
+    if (
+        type(payload) is not dict
+        or payload.get("authenticated") is not True
+    ):
+        raise DockerRuntimeError(
+            "runtime authentication check failed"
+        )
+
+    return True
+
+
+
+def runtime_get_accounts(
+    *,
+    container: RuntimeContainer,
+    session: RuntimeSessionCookie,
+) -> list[dict[str, object]]:
+    raw_response = runtime_http_exchange(
+        container=container,
+        request_bytes=_runtime_request_bytes(
+            method="GET",
+            path="/api/v1/accounts",
+            session=session,
+        ),
+    )
+
+    try:
+        response = parse_runtime_http_response(
+            raw_response
+        )
+    except DockerRuntimeError as exc:
+        raise DockerRuntimeError(
+            "runtime accounts response is invalid"
+        ) from exc
+
+    if response.status_code != 200:
+        raise DockerRuntimeError(
+            "runtime accounts response is invalid"
+        )
+
+    payload = _runtime_json_response(
+        response,
+        error_message=(
+            "runtime accounts response is invalid"
+        ),
+    )
+
+    if (
+        type(payload) is not list
+        or any(
+            type(account) is not dict
+            for account in payload
+        )
+    ):
+        raise DockerRuntimeError(
+            "runtime accounts response is invalid"
+        )
+
+    return payload
+
+
+
+def runtime_create_cash_account(
+    *,
+    container: RuntimeContainer,
+    session: RuntimeSessionCookie,
+    name: str,
+    currency: str,
+) -> dict[str, object]:
+    if type(name) is not str or not name:
+        raise DockerRuntimeError(
+            "runtime account name is invalid"
+        )
+
+    if type(currency) is not str or not currency:
+        raise DockerRuntimeError(
+            "runtime account currency is invalid"
+        )
+
+    raw_response = runtime_http_exchange(
+        container=container,
+        request_bytes=_runtime_request_bytes(
+            method="POST",
+            path="/api/v1/accounts",
+            json_body={
+                "name": name,
+                "accountType": "CASH",
+                "currency": currency,
+                "isDefault": False,
+                "isActive": True,
+            },
+            session=session,
+        ),
+    )
+
+    if raw_response:
+        try:
+            response = parse_runtime_http_response(
+                raw_response
+            )
+        except DockerRuntimeError as exc:
+            raise DockerRuntimeError(
+                "runtime account creation failed"
+            ) from exc
+
+        if not 200 <= response.status_code < 300:
+            raise DockerRuntimeError(
+                "runtime account creation failed"
+            )
+
+    accounts = runtime_get_accounts(
+        container=container,
+        session=session,
+    )
+
+    matches = [
+        account
+        for account in accounts
+        if (
+            account.get("name") == name
+            and account.get("accountType") == "CASH"
+            and account.get("currency") == currency
+            and account.get("isDefault") is False
+            and account.get("isActive") is True
+        )
+    ]
+
+    if len(matches) != 1:
+        raise DockerRuntimeError(
+            "runtime account creation could not be confirmed"
+        )
+
+    account = matches[0]
+    account_id = account.get("id")
+
+    if type(account_id) is not str or not account_id:
+        raise DockerRuntimeError(
+            "runtime account creation could not be confirmed"
+        )
+
+    return account
+
+
+
+def runtime_search_deposits(
+    *,
+    container: RuntimeContainer,
+    session: RuntimeSessionCookie,
+    account_id: str,
+) -> list[dict[str, object]]:
+    if type(account_id) is not str or not account_id:
+        raise DockerRuntimeError(
+            "runtime account ID is invalid"
+        )
+
+    raw_response = runtime_http_exchange(
+        container=container,
+        request_bytes=_runtime_request_bytes(
+            method="POST",
+            path="/api/v1/activities/search",
+            json_body={
+                "page": 0,
+                "pageSize": 20,
+                "accountIdFilter": account_id,
+                "activityTypeFilter": "DEPOSIT",
+            },
+            session=session,
+        ),
+    )
+
+    try:
+        response = parse_runtime_http_response(
+            raw_response
+        )
+    except DockerRuntimeError as exc:
+        raise DockerRuntimeError(
+            "runtime activities response is invalid"
+        ) from exc
+
+    if response.status_code != 200:
+        raise DockerRuntimeError(
+            "runtime activities response is invalid"
+        )
+
+    payload = _runtime_json_response(
+        response,
+        error_message=(
+            "runtime activities response is invalid"
+        ),
+    )
+
+    if type(payload) is not dict:
+        raise DockerRuntimeError(
+            "runtime activities response is invalid"
+        )
+
+    data = payload.get("data")
+
+    if (
+        type(data) is not list
+        or any(
+            type(activity) is not dict
+            for activity in data
+        )
+    ):
+        raise DockerRuntimeError(
+            "runtime activities response is invalid"
+        )
+
+    return data
+
+
+def runtime_create_test_deposit(
+    *,
+    container: RuntimeContainer,
+    session: RuntimeSessionCookie,
+    account_id: str,
+) -> dict[str, object]:
+    if type(account_id) is not str or not account_id:
+        raise DockerRuntimeError(
+            "runtime account ID is invalid"
+        )
+
+    expected_date = "2026-01-15T12:00:00+00:00"
+    expected_amount = "123.45"
+    expected_comment = "WU4C deterministic deposit"
+
+    raw_response = runtime_http_exchange(
+        container=container,
+        request_bytes=_runtime_request_bytes(
+            method="POST",
+            path="/api/v1/activities",
+            json_body={
+                "accountId": account_id,
+                "activityType": "DEPOSIT",
+                "activityDate": (
+                    "2026-01-15T12:00:00.000Z"
+                ),
+                "amount": 123.45,
+                "currency": "USD",
+                "comment": expected_comment,
+                "fxRate": None,
+            },
+            session=session,
+        ),
+    )
+
+    if raw_response:
+        try:
+            response = parse_runtime_http_response(
+                raw_response
+            )
+        except DockerRuntimeError as exc:
+            raise DockerRuntimeError(
+                "runtime deposit creation failed"
+            ) from exc
+
+        if not 200 <= response.status_code < 300:
+            raise DockerRuntimeError(
+                "runtime deposit creation failed"
+            )
+
+    activities = runtime_search_deposits(
+        container=container,
+        session=session,
+        account_id=account_id,
+    )
+
+    matches = [
+        activity
+        for activity in activities
+        if (
+            activity.get("accountId") == account_id
+            and activity.get("activityType")
+            == "DEPOSIT"
+            and activity.get("status") == "POSTED"
+            and activity.get("date")
+            == expected_date
+            and activity.get("amount")
+            == expected_amount
+            and activity.get("currency") == "USD"
+            and activity.get("comment")
+            == expected_comment
+        )
+    ]
+
+    if len(matches) != 1:
+        raise DockerRuntimeError(
+            "runtime deposit creation could not be confirmed"
+        )
+
+    activity = matches[0]
+    activity_id = activity.get("id")
+
+    if (
+        type(activity_id) is not str
+        or not activity_id
+    ):
+        raise DockerRuntimeError(
+            "runtime deposit creation could not be confirmed"
+        )
+
+    return activity
+
+
+
+@dataclass(frozen=True)
+class RuntimeFunctionalSnapshot:
+    account_id: str
+    activity_id: str
+    account_name: str
+    account_type: str
+    account_currency: str
+    activity_type: str
+    activity_status: str
+    activity_date: str
+    amount: str
+    activity_currency: str
+    comment: str
+
+
+def capture_runtime_functional_snapshot(
+    *,
+    container: RuntimeContainer,
+    session: RuntimeSessionCookie,
+    account_id: str,
+) -> RuntimeFunctionalSnapshot:
+    if type(account_id) is not str or not account_id:
+        raise DockerRuntimeError(
+            "runtime functional snapshot is invalid"
+        )
+
+    accounts = runtime_get_accounts(
+        container=container,
+        session=session,
+    )
+
+    account_matches = [
+        account
+        for account in accounts
+        if (
+            account.get("id") == account_id
+            and account.get("name")
+            == "WU4C Test Cash"
+            and account.get("accountType")
+            == "CASH"
+            and account.get("currency")
+            == "USD"
+            and account.get("isDefault") is False
+            and account.get("isActive") is True
+        )
+    ]
+
+    if len(account_matches) != 1:
+        raise DockerRuntimeError(
+            "runtime functional snapshot is invalid"
+        )
+
+    account = account_matches[0]
+
+    deposits = runtime_search_deposits(
+        container=container,
+        session=session,
+        account_id=account_id,
+    )
+
+    deposit_matches = [
+        activity
+        for activity in deposits
+        if (
+            activity.get("accountId")
+            == account_id
+            and activity.get("activityType")
+            == "DEPOSIT"
+            and activity.get("status")
+            == "POSTED"
+            and activity.get("date")
+            == "2026-01-15T12:00:00+00:00"
+            and activity.get("amount")
+            == "123.45"
+            and activity.get("currency")
+            == "USD"
+            and activity.get("comment")
+            == "WU4C deterministic deposit"
+        )
+    ]
+
+    if len(deposit_matches) != 1:
+        raise DockerRuntimeError(
+            "runtime functional snapshot is invalid"
+        )
+
+    activity = deposit_matches[0]
+
+    activity_id = activity.get("id")
+
+    if (
+        type(activity_id) is not str
+        or not activity_id
+    ):
+        raise DockerRuntimeError(
+            "runtime functional snapshot is invalid"
+        )
+
+    return RuntimeFunctionalSnapshot(
+        account_id=account_id,
+        activity_id=activity_id,
+        account_name="WU4C Test Cash",
+        account_type="CASH",
+        account_currency="USD",
+        activity_type="DEPOSIT",
+        activity_status="POSTED",
+        activity_date=(
+            "2026-01-15T12:00:00+00:00"
+        ),
+        amount="123.45",
+        activity_currency="USD",
+        comment="WU4C deterministic deposit",
+    )
+
+
 def runtime_health_response_is_ready(
     response: bytes,
 ) -> bool:
