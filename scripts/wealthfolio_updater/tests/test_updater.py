@@ -66,7 +66,7 @@ class WrapperVersionTests(unittest.TestCase):
 
 
 class ReleasePolicyTests(unittest.TestCase):
-    def test_patch_is_automatic(self):
+    def test_newer_patch_is_automatic(self):
         current = SemVer.parse("3.8.2")
         candidate = SemVer.parse("3.8.3")
 
@@ -75,22 +75,22 @@ class ReleasePolicyTests(unittest.TestCase):
             ReleasePolicy.AUTO,
         )
 
-    def test_minor_requires_review(self):
+    def test_newer_minor_is_automatic(self):
         current = SemVer.parse("3.8.2")
         candidate = SemVer.parse("3.9.0")
 
         self.assertEqual(
             classify_release_policy(current, candidate),
-            ReleasePolicy.REVIEW_REQUIRED,
+            ReleasePolicy.AUTO,
         )
 
-    def test_major_is_blocked(self):
+    def test_newer_major_is_automatic(self):
         current = SemVer.parse("3.8.2")
         candidate = SemVer.parse("4.0.0")
 
         self.assertEqual(
             classify_release_policy(current, candidate),
-            ReleasePolicy.BLOCK_MAJOR,
+            ReleasePolicy.AUTO,
         )
 
     def test_same_version_is_not_an_update(self):
@@ -112,54 +112,43 @@ class ReleasePolicyTests(unittest.TestCase):
 
 
 class CandidateSelectionTests(unittest.TestCase):
-    def test_patch_wins_over_newer_minor_and_major(self):
+    def test_latest_newer_release_is_selected(self):
         current = SemVer.parse("3.8.2")
         releases = [
-            SemVer.parse("4.0.0"),
-            SemVer.parse("3.9.0"),
             SemVer.parse("3.8.3"),
-        ]
-
-        selection = select_candidate(current, releases)
-
-        self.assertEqual(selection.version, SemVer.parse("3.8.3"))
-        self.assertEqual(selection.policy, ReleasePolicy.AUTO)
-
-    def test_minor_selected_when_no_patch_exists(self):
-        current = SemVer.parse("3.8.2")
-        releases = [
             SemVer.parse("4.0.0"),
             SemVer.parse("3.9.0"),
         ]
 
         selection = select_candidate(current, releases)
 
-        self.assertEqual(selection.version, SemVer.parse("3.9.0"))
-        self.assertEqual(selection.policy, ReleasePolicy.REVIEW_REQUIRED)
+        self.assertEqual(
+            selection.version,
+            SemVer.parse("4.0.0"),
+        )
+        self.assertEqual(
+            selection.policy,
+            ReleasePolicy.AUTO,
+        )
 
-    def test_highest_minor_is_selected_for_review(self):
+    def test_latest_release_uses_numeric_semver_ordering(self):
         current = SemVer.parse("3.6.3")
         releases = [
-            SemVer.parse("3.7.0"),
-            SemVer.parse("3.8.0"),
+            SemVer.parse("3.9.10"),
+            SemVer.parse("3.10.0"),
+            SemVer.parse("3.8.5"),
         ]
 
         selection = select_candidate(current, releases)
 
-        self.assertEqual(selection.version, SemVer.parse("3.8.0"))
-        self.assertEqual(selection.policy, ReleasePolicy.REVIEW_REQUIRED)
-
-    def test_major_only_is_blocked(self):
-        current = SemVer.parse("3.8.2")
-        releases = [
-            SemVer.parse("4.0.0"),
-            SemVer.parse("4.1.0"),
-        ]
-
-        selection = select_candidate(current, releases)
-
-        self.assertEqual(selection.version, SemVer.parse("4.1.0"))
-        self.assertEqual(selection.policy, ReleasePolicy.BLOCK_MAJOR)
+        self.assertEqual(
+            selection.version,
+            SemVer.parse("3.10.0"),
+        )
+        self.assertEqual(
+            selection.policy,
+            ReleasePolicy.AUTO,
+        )
 
     def test_no_newer_release_returns_no_update(self):
         current = SemVer.parse("3.8.2")
@@ -171,7 +160,10 @@ class CandidateSelectionTests(unittest.TestCase):
         selection = select_candidate(current, releases)
 
         self.assertIsNone(selection.version)
-        self.assertEqual(selection.policy, ReleasePolicy.NO_UPDATE)
+        self.assertEqual(
+            selection.policy,
+            ReleasePolicy.NO_UPDATE,
+        )
 
 
 class PrebuiltBootstrapTests(unittest.TestCase):

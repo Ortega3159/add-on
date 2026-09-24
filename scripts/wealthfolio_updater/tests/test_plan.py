@@ -50,7 +50,7 @@ def prebuilt_repository(
 
 
 class LocalBuildPlanTests(unittest.TestCase):
-    def test_local_build_patch_becomes_automatic_candidate(self):
+    def test_local_build_uses_latest_stable_candidate(self):
         plan = plan_update(
             repository=local_repository(),
             releases=[
@@ -67,30 +67,27 @@ class LocalBuildPlanTests(unittest.TestCase):
         )
         self.assertEqual(
             plan.target_upstream,
-            SemVer.parse("3.6.4"),
+            SemVer.parse("4.0.0"),
         )
         self.assertEqual(
             plan.target_wrapper,
-            WrapperVersion.parse("3.6.4-1"),
+            WrapperVersion.parse("4.0.0-1"),
         )
         self.assertEqual(
             plan.policy,
             ReleasePolicy.AUTO,
         )
 
-    def test_local_build_minor_requires_review(self):
+    def test_local_build_minor_is_automatic(self):
         plan = plan_update(
             repository=local_repository(),
-            releases=[
-                SemVer.parse("3.8.0"),
-                SemVer.parse("4.0.0"),
-            ],
+            releases=[SemVer.parse("3.8.0")],
             approved_version=None,
         )
 
         self.assertEqual(
             plan.state,
-            PlanState.CANDIDATE_REVIEW_REQUIRED,
+            PlanState.CANDIDATE_AUTO,
         )
         self.assertEqual(
             plan.target_upstream,
@@ -102,7 +99,7 @@ class LocalBuildPlanTests(unittest.TestCase):
         )
         self.assertEqual(
             plan.policy,
-            ReleasePolicy.REVIEW_REQUIRED,
+            ReleasePolicy.AUTO,
         )
 
 
@@ -117,7 +114,10 @@ class NormalPlanTests(unittest.TestCase):
             approved_version=None,
         )
 
-        self.assertEqual(plan.state, PlanState.NOOP)
+        self.assertEqual(
+            plan.state,
+            PlanState.NOOP,
+        )
         self.assertIsNone(plan.target_upstream)
         self.assertIsNone(plan.target_wrapper)
         self.assertEqual(
@@ -125,7 +125,7 @@ class NormalPlanTests(unittest.TestCase):
             ReleasePolicy.NO_UPDATE,
         )
 
-    def test_patch_becomes_automatic_candidate(self):
+    def test_latest_newer_release_becomes_automatic_candidate(self):
         plan = plan_update(
             repository=prebuilt_repository(),
             releases=[
@@ -142,11 +142,11 @@ class NormalPlanTests(unittest.TestCase):
         )
         self.assertEqual(
             plan.target_upstream,
-            SemVer.parse("3.8.3"),
+            SemVer.parse("4.0.0"),
         )
         self.assertEqual(
             plan.target_wrapper,
-            WrapperVersion.parse("3.8.3-1"),
+            WrapperVersion.parse("4.0.0-1"),
         )
         self.assertEqual(
             plan.policy,
@@ -159,84 +159,16 @@ class NormalPlanTests(unittest.TestCase):
                 upstream="3.8.2",
                 wrapper="3.8.2-27",
             ),
-            releases=[SemVer.parse("3.8.3")],
-            approved_version=None,
-        )
-
-        self.assertEqual(
-            plan.target_wrapper,
-            WrapperVersion.parse("3.8.3-1"),
-        )
-
-    def test_minor_without_approval_requires_review(self):
-        plan = plan_update(
-            repository=prebuilt_repository(),
             releases=[SemVer.parse("3.9.0")],
             approved_version=None,
         )
 
         self.assertEqual(
-            plan.state,
-            PlanState.CANDIDATE_REVIEW_REQUIRED,
-        )
-        self.assertEqual(
-            plan.target_upstream,
-            SemVer.parse("3.9.0"),
-        )
-        self.assertEqual(
-            plan.target_wrapper,
-            WrapperVersion.parse("3.9.0-1"),
-        )
-        self.assertEqual(
-            plan.policy,
-            ReleasePolicy.REVIEW_REQUIRED,
-        )
-
-    def test_minor_with_exact_approval_is_approved_candidate(self):
-        plan = plan_update(
-            repository=prebuilt_repository(),
-            releases=[SemVer.parse("3.9.0")],
-            approved_version=SemVer.parse("3.9.0"),
-        )
-
-        self.assertEqual(
-            plan.state,
-            PlanState.CANDIDATE_APPROVED,
-        )
-        self.assertEqual(
-            plan.target_upstream,
-            SemVer.parse("3.9.0"),
-        )
-        self.assertEqual(
-            plan.target_wrapper,
-            WrapperVersion.parse("3.9.0-1"),
-        )
-        self.assertEqual(
-            plan.policy,
-            ReleasePolicy.REVIEW_REQUIRED,
-        )
-
-    def test_wrong_minor_approval_fails_closed(self):
-        plan = plan_update(
-            repository=prebuilt_repository(),
-            releases=[SemVer.parse("3.9.0")],
-            approved_version=SemVer.parse("3.9.1"),
-        )
-
-        self.assertEqual(
-            plan.state,
-            PlanState.APPROVAL_MISMATCH,
-        )
-        self.assertEqual(
-            plan.target_upstream,
-            SemVer.parse("3.9.0"),
-        )
-        self.assertEqual(
             plan.target_wrapper,
             WrapperVersion.parse("3.9.0-1"),
         )
 
-    def test_major_is_blocked_even_with_exact_approval(self):
+    def test_approval_is_not_valid_for_automatic_candidate(self):
         plan = plan_update(
             repository=prebuilt_repository(),
             releases=[SemVer.parse("4.0.0")],
@@ -245,57 +177,17 @@ class NormalPlanTests(unittest.TestCase):
 
         self.assertEqual(
             plan.state,
-            PlanState.POLICY_BLOCK_MAJOR,
+            PlanState.APPROVAL_MISMATCH,
         )
         self.assertEqual(
             plan.target_upstream,
             SemVer.parse("4.0.0"),
         )
-        self.assertIsNone(plan.target_wrapper)
-        self.assertEqual(
-            plan.policy,
-            ReleasePolicy.BLOCK_MAJOR,
-        )
-
-    def test_approval_cannot_skip_a_preferred_patch(self):
-        plan = plan_update(
-            repository=prebuilt_repository(),
-            releases=[
-                SemVer.parse("3.8.3"),
-                SemVer.parse("3.9.0"),
-            ],
-            approved_version=SemVer.parse("3.9.0"),
-        )
-
-        self.assertEqual(
-            plan.state,
-            PlanState.APPROVAL_MISMATCH,
-        )
-        self.assertEqual(
-            plan.target_upstream,
-            SemVer.parse("3.8.3"),
-        )
         self.assertEqual(
             plan.target_wrapper,
-            WrapperVersion.parse("3.8.3-1"),
-        )
-
-    def test_approval_is_not_valid_for_an_automatic_patch(self):
-        plan = plan_update(
-            repository=prebuilt_repository(),
-            releases=[SemVer.parse("3.8.3")],
-            approved_version=SemVer.parse("3.8.3"),
-        )
-
-        self.assertEqual(
-            plan.state,
-            PlanState.APPROVAL_MISMATCH,
+            WrapperVersion.parse("4.0.0-1"),
         )
         self.assertEqual(
-            plan.target_upstream,
-            SemVer.parse("3.8.3"),
+            plan.policy,
+            ReleasePolicy.AUTO,
         )
-
-
-if __name__ == "__main__":
-    unittest.main()

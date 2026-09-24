@@ -41,36 +41,18 @@ def classify_release_policy(
     if candidate <= current:
         return ReleasePolicy.NO_UPDATE
 
-    if candidate.major > current.major:
-        return ReleasePolicy.BLOCK_MAJOR
-
-    if (
-        candidate.major == current.major
-        and candidate.minor == current.minor
-    ):
-        return ReleasePolicy.AUTO
-
-    if (
-        candidate.major == current.major
-        and candidate.minor > current.minor
-    ):
-        return ReleasePolicy.REVIEW_REQUIRED
-
-    return ReleasePolicy.NO_UPDATE
+    return ReleasePolicy.AUTO
 
 
 def select_candidate(
     current: SemVer,
     releases: Iterable[SemVer],
 ) -> CandidateSelection:
-    newer = sorted(
-        {
-            release
-            for release in releases
-            if release > current
-        },
-        reverse=True,
-    )
+    newer = {
+        release
+        for release in releases
+        if release > current
+    }
 
     if not newer:
         return CandidateSelection(
@@ -78,39 +60,14 @@ def select_candidate(
             policy=ReleasePolicy.NO_UPDATE,
         )
 
-    patches = [
-        release
-        for release in newer
-        if (
-            release.major == current.major
-            and release.minor == current.minor
-        )
-    ]
-
-    if patches:
-        candidate = max(patches)
-        return CandidateSelection(
-            version=candidate,
-            policy=ReleasePolicy.AUTO,
-        )
-
-    same_major = [
-        release
-        for release in newer
-        if release.major == current.major
-    ]
-
-    if same_major:
-        candidate = max(same_major)
-        return CandidateSelection(
-            version=candidate,
-            policy=ReleasePolicy.REVIEW_REQUIRED,
-        )
-
     candidate = max(newer)
+
     return CandidateSelection(
         version=candidate,
-        policy=ReleasePolicy.BLOCK_MAJOR,
+        policy=classify_release_policy(
+            current,
+            candidate,
+        ),
     )
 
 

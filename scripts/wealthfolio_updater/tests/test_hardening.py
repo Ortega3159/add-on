@@ -68,7 +68,7 @@ def prebuilt_config():
 
 
 class ApprovalHardeningTests(unittest.TestCase):
-    def test_matching_approval_accepts_local_build_minor(self):
+    def test_approval_is_rejected_for_local_build_automatic_candidate(self):
         plan = plan_update(
             repository=local_repository(),
             releases=[SemVer.parse("3.8.0")],
@@ -77,7 +77,7 @@ class ApprovalHardeningTests(unittest.TestCase):
 
         self.assertEqual(
             plan.state,
-            PlanState.CANDIDATE_APPROVED,
+            PlanState.APPROVAL_MISMATCH,
         )
         self.assertEqual(
             plan.target_upstream,
@@ -89,7 +89,7 @@ class ApprovalHardeningTests(unittest.TestCase):
         )
         self.assertEqual(
             plan.policy,
-            ReleasePolicy.REVIEW_REQUIRED,
+            ReleasePolicy.AUTO,
         )
 
     def test_stale_approval_is_rejected_when_there_is_no_update(self):

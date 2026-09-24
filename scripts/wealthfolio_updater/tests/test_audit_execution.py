@@ -150,7 +150,7 @@ class AuditExecutionTests(unittest.TestCase):
 
         self.assertEqual(
             result.plan.state,
-            PlanState.CANDIDATE_REVIEW_REQUIRED,
+            PlanState.CANDIDATE_AUTO,
         )
         self.assertEqual(
             result.latest_stable,

@@ -75,7 +75,7 @@ def inspection(index_digest):
 
 
 class AuditPlanningTests(unittest.TestCase):
-    def test_local_build_review_candidate_is_inspected(self):
+    def test_local_build_latest_candidate_is_automatic_and_inspected(self):
         inspected = []
 
         def inspect_upstream(version):
@@ -106,12 +106,12 @@ class AuditPlanningTests(unittest.TestCase):
         )
         self.assertEqual(
             result.candidate.policy,
-            ReleasePolicy.REVIEW_REQUIRED,
+            ReleasePolicy.AUTO,
         )
 
         self.assertEqual(
             result.plan.state,
-            PlanState.CANDIDATE_REVIEW_REQUIRED,
+            PlanState.CANDIDATE_AUTO,
         )
         self.assertEqual(
             result.plan.target_upstream,
@@ -140,7 +140,7 @@ class AuditPlanningTests(unittest.TestCase):
 
 
 class AuditTargetTests(unittest.TestCase):
-    def test_review_required_candidate_is_inspected_before_approval(self):
+    def test_automatic_candidate_is_inspected(self):
         inspected = []
 
         def inspect_upstream(version):
@@ -157,7 +157,7 @@ class AuditTargetTests(unittest.TestCase):
 
         self.assertEqual(
             result.plan.state,
-            PlanState.CANDIDATE_REVIEW_REQUIRED,
+            PlanState.CANDIDATE_AUTO,
         )
         self.assertEqual(
             inspected,
@@ -171,12 +171,12 @@ class AuditTargetTests(unittest.TestCase):
             result.oci.expected_index_digest,
         )
 
-    def test_blocked_major_keeps_current_upstream_as_oci_target(self):
+    def test_major_candidate_is_automatic_and_inspected(self):
         inspected = []
 
         def inspect_upstream(version):
             inspected.append(version)
-            return inspection(CURRENT_DIGEST)
+            return inspection(CANDIDATE_DIGEST)
 
         result = run_audit(
             repository=prebuilt_repository(),
@@ -188,15 +188,18 @@ class AuditTargetTests(unittest.TestCase):
 
         self.assertEqual(
             result.plan.state,
-            PlanState.POLICY_BLOCK_MAJOR,
+            PlanState.CANDIDATE_AUTO,
         )
         self.assertEqual(
             inspected,
-            [SemVer.parse("3.8.2")],
+            [SemVer.parse("4.0.0")],
         )
         self.assertEqual(
+            result.oci.version,
+            SemVer.parse("4.0.0"),
+        )
+        self.assertIsNone(
             result.oci.expected_index_digest,
-            CURRENT_DIGEST,
         )
 
     def test_noop_still_verifies_current_upstream_identity(self):
@@ -309,7 +312,7 @@ class AuditInspectorFailureTests(unittest.TestCase):
 
 
 class AuditCandidateIdentityTests(unittest.TestCase):
-    def test_auto_candidate_is_inspected_instead_of_current_upstream(self):
+    def test_latest_auto_candidate_is_inspected_instead_of_current_upstream(self):
         inspected = []
 
         def inspect_upstream(version):
@@ -333,11 +336,11 @@ class AuditCandidateIdentityTests(unittest.TestCase):
         )
         self.assertEqual(
             inspected,
-            [SemVer.parse("3.8.3")],
+            [SemVer.parse("3.9.0")],
         )
         self.assertEqual(
             result.oci.version,
-            SemVer.parse("3.8.3"),
+            SemVer.parse("3.9.0"),
         )
         self.assertIsNone(
             result.oci.expected_index_digest,
