@@ -152,36 +152,10 @@ def plan_update(
     releases: Iterable[SemVer],
     approved_version: SemVer | None,
 ) -> UpdatePlan:
-    if repository.distribution_mode == DistributionMode.LOCAL_BUILD:
-        bootstrap = compute_prebuilt_bootstrap(
-            current_upstream=repository.upstream_version,
-            current_wrapper=repository.wrapper_version,
-            has_image=False,
-            has_state=False,
-        )
-
-        if bootstrap is None:
-            raise ValueError(
-                "local-build repository unexpectedly "
-                "did not require prebuilt bootstrap"
-            )
-
-        if approved_version is not None:
-            return UpdatePlan(
-                state=PlanState.APPROVAL_MISMATCH,
-                target_upstream=bootstrap.upstream,
-                target_wrapper=bootstrap.candidate_wrapper,
-                policy=None,
-            )
-
-        return UpdatePlan(
-            state=PlanState.PREBUILT_BOOTSTRAP,
-            target_upstream=bootstrap.upstream,
-            target_wrapper=bootstrap.candidate_wrapper,
-            policy=None,
-        )
-
-    if repository.distribution_mode != DistributionMode.PREBUILT:
+    if repository.distribution_mode not in {
+        DistributionMode.LOCAL_BUILD,
+        DistributionMode.PREBUILT,
+    }:
         raise ValueError(
             f"unsupported distribution mode: "
             f"{repository.distribution_mode!r}"

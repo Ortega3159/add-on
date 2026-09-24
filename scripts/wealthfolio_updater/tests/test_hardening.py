@@ -4,6 +4,7 @@ from scripts.wealthfolio_updater.updater import (
     DistributionMode,
     EXPECTED_PREBUILT_IMAGE,
     PlanState,
+    ReleasePolicy,
     RepositoryState,
     SemVer,
     WrapperVersion,
@@ -67,7 +68,7 @@ def prebuilt_config():
 
 
 class ApprovalHardeningTests(unittest.TestCase):
-    def test_approval_is_rejected_during_prebuilt_bootstrap(self):
+    def test_matching_approval_accepts_local_build_minor(self):
         plan = plan_update(
             repository=local_repository(),
             releases=[SemVer.parse("3.8.0")],
@@ -76,15 +77,19 @@ class ApprovalHardeningTests(unittest.TestCase):
 
         self.assertEqual(
             plan.state,
-            PlanState.APPROVAL_MISMATCH,
+            PlanState.CANDIDATE_APPROVED,
         )
         self.assertEqual(
             plan.target_upstream,
-            SemVer.parse("3.6.3"),
+            SemVer.parse("3.8.0"),
         )
         self.assertEqual(
             plan.target_wrapper,
-            WrapperVersion.parse("3.6.3-5"),
+            WrapperVersion.parse("3.8.0-1"),
+        )
+        self.assertEqual(
+            plan.policy,
+            ReleasePolicy.REVIEW_REQUIRED,
         )
 
     def test_stale_approval_is_rejected_when_there_is_no_update(self):

@@ -145,12 +145,12 @@ class AuditExecutionTests(unittest.TestCase):
         self.assertEqual(fetched_pages, [1])
         self.assertEqual(
             fetched_manifests,
-            [SemVer.parse("3.6.3")],
+            [SemVer.parse("3.8.0")],
         )
 
         self.assertEqual(
             result.plan.state,
-            PlanState.PREBUILT_BOOTSTRAP,
+            PlanState.CANDIDATE_REVIEW_REQUIRED,
         )
         self.assertEqual(
             result.latest_stable,

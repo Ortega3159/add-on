@@ -75,7 +75,7 @@ def inspection(index_digest):
 
 
 class AuditPlanningTests(unittest.TestCase):
-    def test_bootstrap_preserves_normal_candidate_but_inspects_current_upstream(self):
+    def test_local_build_review_candidate_is_inspected(self):
         inspected = []
 
         def inspect_upstream(version):
@@ -111,28 +111,27 @@ class AuditPlanningTests(unittest.TestCase):
 
         self.assertEqual(
             result.plan.state,
-            PlanState.PREBUILT_BOOTSTRAP,
+            PlanState.CANDIDATE_REVIEW_REQUIRED,
         )
         self.assertEqual(
             result.plan.target_upstream,
-            SemVer.parse("3.6.3"),
+            SemVer.parse("3.8.0"),
         )
         self.assertEqual(
             result.plan.target_wrapper,
-            WrapperVersion.parse("3.6.3-5"),
+            WrapperVersion.parse("3.8.0-1"),
         )
 
         self.assertEqual(
             inspected,
-            [SemVer.parse("3.6.3")],
+            [SemVer.parse("3.8.0")],
         )
         self.assertEqual(
             result.oci.version,
-            SemVer.parse("3.6.3"),
+            SemVer.parse("3.8.0"),
         )
-        self.assertEqual(
+        self.assertIsNone(
             result.oci.expected_index_digest,
-            CURRENT_DIGEST,
         )
         self.assertEqual(
             result.oci.inspection.index_digest,
@@ -242,7 +241,7 @@ class AuditFailClosedTests(unittest.TestCase):
         with self.assertRaises(AuditError):
             run_audit(
                 repository=local_repository(),
-                releases=[release(1, "3.8.0")],
+                releases=[release(1, "3.6.3")],
                 expected_git_sha=GIT_SHA,
                 current_git_sha=GIT_SHA,
                 inspect_upstream=lambda version: inspection(

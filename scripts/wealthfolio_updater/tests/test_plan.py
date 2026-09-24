@@ -49,8 +49,36 @@ def prebuilt_repository(
     )
 
 
-class BootstrapPlanTests(unittest.TestCase):
-    def test_prebuilt_bootstrap_takes_precedence_over_newer_upstream(self):
+class LocalBuildPlanTests(unittest.TestCase):
+    def test_local_build_patch_becomes_automatic_candidate(self):
+        plan = plan_update(
+            repository=local_repository(),
+            releases=[
+                SemVer.parse("3.6.4"),
+                SemVer.parse("3.8.0"),
+                SemVer.parse("4.0.0"),
+            ],
+            approved_version=None,
+        )
+
+        self.assertEqual(
+            plan.state,
+            PlanState.CANDIDATE_AUTO,
+        )
+        self.assertEqual(
+            plan.target_upstream,
+            SemVer.parse("3.6.4"),
+        )
+        self.assertEqual(
+            plan.target_wrapper,
+            WrapperVersion.parse("3.6.4-1"),
+        )
+        self.assertEqual(
+            plan.policy,
+            ReleasePolicy.AUTO,
+        )
+
+    def test_local_build_minor_requires_review(self):
         plan = plan_update(
             repository=local_repository(),
             releases=[
@@ -62,17 +90,20 @@ class BootstrapPlanTests(unittest.TestCase):
 
         self.assertEqual(
             plan.state,
-            PlanState.PREBUILT_BOOTSTRAP,
+            PlanState.CANDIDATE_REVIEW_REQUIRED,
         )
         self.assertEqual(
             plan.target_upstream,
-            SemVer.parse("3.6.3"),
+            SemVer.parse("3.8.0"),
         )
         self.assertEqual(
             plan.target_wrapper,
-            WrapperVersion.parse("3.6.3-5"),
+            WrapperVersion.parse("3.8.0-1"),
         )
-        self.assertIsNone(plan.policy)
+        self.assertEqual(
+            plan.policy,
+            ReleasePolicy.REVIEW_REQUIRED,
+        )
 
 
 class NormalPlanTests(unittest.TestCase):
