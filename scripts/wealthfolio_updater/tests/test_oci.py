@@ -301,7 +301,7 @@ class OciIndexInspectionTests(unittest.TestCase):
 
 
 
-class OciIndexHardeningTests(unittest.TestCase):
+class OciIndexContractHardeningTests(unittest.TestCase):
     def test_invalid_descriptor_digest_is_rejected(self):
         descriptors = json.loads(
             make_index().decode()
