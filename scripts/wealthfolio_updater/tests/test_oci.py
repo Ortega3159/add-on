@@ -560,5 +560,130 @@ class OciIndexHardeningTests(unittest.TestCase):
             )
 
 
+DOCKER_MANIFEST_LIST_MEDIA_TYPE = (
+    "application/vnd.docker.distribution."
+    "manifest.list.v2+json"
+)
+
+DOCKER_IMAGE_MANIFEST_MEDIA_TYPE = (
+    "application/vnd.docker.distribution."
+    "manifest.v2+json"
+)
+
+
+def make_docker_manifest_list(
+    *,
+    descriptors=None,
+    media_type=DOCKER_MANIFEST_LIST_MEDIA_TYPE,
+):
+    if descriptors is None:
+        descriptors = [
+            {
+                "mediaType": DOCKER_IMAGE_MANIFEST_MEDIA_TYPE,
+                "digest": AMD64_DIGEST,
+                "size": 1366,
+                "platform": {
+                    "os": "linux",
+                    "architecture": "amd64",
+                },
+            },
+            {
+                "mediaType": DOCKER_IMAGE_MANIFEST_MEDIA_TYPE,
+                "digest": ARM64_DIGEST,
+                "size": 1366,
+                "platform": {
+                    "os": "linux",
+                    "architecture": "arm64",
+                },
+            },
+        ]
+
+    return json.dumps(
+        {
+            "schemaVersion": 2,
+            "mediaType": media_type,
+            "manifests": descriptors,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+class DockerManifestListCompatibilityTests(unittest.TestCase):
+    def test_accepts_docker_v2_multiarch_manifest_list(self):
+        body = make_docker_manifest_list()
+
+        inspection = inspect_oci_index(
+            body=body,
+            content_type=DOCKER_MANIFEST_LIST_MEDIA_TYPE,
+            content_digest=digest_of(body),
+        )
+
+        self.assertEqual(
+            inspection.index_digest,
+            digest_of(body),
+        )
+        self.assertEqual(
+            inspection.amd64_digest,
+            AMD64_DIGEST,
+        )
+        self.assertEqual(
+            inspection.arm64_digest,
+            ARM64_DIGEST,
+        )
+        self.assertEqual(
+            inspection.attestation_count,
+            0,
+        )
+
+    def test_docker_list_rejects_oci_child_manifests(self):
+        descriptors = json.loads(
+            make_docker_manifest_list().decode()
+        )["manifests"]
+
+        for descriptor in descriptors:
+            descriptor["mediaType"] = (
+                OCI_IMAGE_MANIFEST_MEDIA_TYPE
+            )
+
+        body = make_docker_manifest_list(
+            descriptors=descriptors
+        )
+
+        with self.assertRaises(ValueError):
+            inspect_oci_index(
+                body=body,
+                content_type=DOCKER_MANIFEST_LIST_MEDIA_TYPE,
+                content_digest=digest_of(body),
+            )
+
+    def test_oci_index_rejects_docker_child_manifests(self):
+        descriptors = json.loads(
+            make_docker_manifest_list().decode()
+        )["manifests"]
+
+        body = make_index(
+            descriptors=descriptors
+        )
+
+        with self.assertRaises(ValueError):
+            inspect_oci_index(
+                body=body,
+                content_type=OCI_IMAGE_INDEX_MEDIA_TYPE,
+                content_digest=digest_of(body),
+            )
+
+    def test_http_and_body_index_families_must_match(self):
+        body = make_docker_manifest_list(
+            media_type=OCI_IMAGE_INDEX_MEDIA_TYPE
+        )
+
+        with self.assertRaises(ValueError):
+            inspect_oci_index(
+                body=body,
+                content_type=DOCKER_MANIFEST_LIST_MEDIA_TYPE,
+                content_digest=digest_of(body),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

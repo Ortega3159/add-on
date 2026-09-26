@@ -14,6 +14,23 @@ OCI_IMAGE_MANIFEST_MEDIA_TYPE = (
     "application/vnd.oci.image.manifest.v1+json"
 )
 
+DOCKER_MANIFEST_LIST_MEDIA_TYPE = (
+    "application/vnd.docker.distribution."
+    "manifest.list.v2+json"
+)
+
+DOCKER_IMAGE_MANIFEST_MEDIA_TYPE = (
+    "application/vnd.docker.distribution."
+    "manifest.v2+json"
+)
+
+_INDEX_MANIFEST_MEDIA_TYPES = {
+    OCI_IMAGE_INDEX_MEDIA_TYPE:
+        OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+    DOCKER_MANIFEST_LIST_MEDIA_TYPE:
+        DOCKER_IMAGE_MANIFEST_MEDIA_TYPE,
+}
+
 _DIGEST_RE = re.compile(
     r"sha256:[0-9a-f]{64}"
 )
@@ -113,9 +130,15 @@ def inspect_oci_index(
             "Content-Type must be text"
         )
 
-    if content_type != OCI_IMAGE_INDEX_MEDIA_TYPE:
+    expected_manifest_media_type = (
+        _INDEX_MANIFEST_MEDIA_TYPES.get(
+            content_type
+        )
+    )
+
+    if expected_manifest_media_type is None:
         raise ValueError(
-            "unsupported OCI index Content-Type"
+            "unsupported multiarch index Content-Type"
         )
 
     expected_digest = _validate_digest(
@@ -150,9 +173,9 @@ def inspect_oci_index(
 
     media_type = index.get("mediaType")
 
-    if media_type != OCI_IMAGE_INDEX_MEDIA_TYPE:
+    if media_type != content_type:
         raise ValueError(
-            "OCI index mediaType does not match expected type"
+            "index mediaType does not match Content-Type"
         )
 
     manifests = index.get("manifests")
@@ -181,7 +204,7 @@ def inspect_oci_index(
 
         if (
             descriptor_media_type
-            != OCI_IMAGE_MANIFEST_MEDIA_TYPE
+            != expected_manifest_media_type
         ):
             raise ValueError(
                 f"descriptor {position} has unsupported mediaType"
